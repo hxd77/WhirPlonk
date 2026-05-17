@@ -1,0 +1,3 @@
+"C:\Program Files\CMake\bin\cmake.exe" -E rm -f CMakeFiles\whir_cli.dir/objects.a
+C:\MingGw64\mingw64\bin\ar.exe qc CMakeFiles\whir_cli.dir/objects.a @CMakeFiles\whir_cli.dir\objects1.rsp
+C:\MingGw64\mingw64\bin\g++.exe -O3 -DNDEBUG -Wl,--whole-archive CMakeFiles\whir_cli.dir/objects.a -Wl,--no-whole-archive -o whir_cli.exe -Wl,--out-implib,libwhir_cli.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\whir_cli.dir\linkLibs.rsp

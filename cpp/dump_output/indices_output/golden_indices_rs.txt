@@ -1,0 +1,17 @@
+# SECTION challenge_indices
+CASE 0 128-5-dedup num_leaves=128 count=5 dedup=true entropy_len=5
+  indices 1 9 35 69 103
+CASE 1 128-5-nodedup num_leaves=128 count=5 dedup=false entropy_len=5
+  indices 1 35 69 103 9
+CASE 2 8192-5-dedup num_leaves=8192 count=5 dedup=true entropy_len=10
+  indices 291 1383 2475 3567 4660
+CASE 3 1m-4-dedup num_leaves=1048576 count=4 dedup=true entropy_len=12
+  indices 144196 144470 563900 978961
+CASE 4 128-5-dups num_leaves=128 count=5 dedup=true entropy_len=5
+  indices 32 64 96
+CASE 5 1leaf-3-dedup num_leaves=1 count=3 dedup=true entropy_len=0
+  indices 0
+CASE 6 1leaf-3-nodedup num_leaves=1 count=3 dedup=false entropy_len=0
+  indices 0 0 0
+CASE 7 0count num_leaves=8 count=0 dedup=true entropy_len=0
+  indices

@@ -1,0 +1,2 @@
+C:\MingGw64\mingw64\bin\ar.exe qc libwhir_thirdparty.a CMakeFiles/whir_thirdparty.dir/third_party/blake3/blake3.c.obj CMakeFiles/whir_thirdparty.dir/third_party/blake3/blake3_dispatch.c.obj CMakeFiles/whir_thirdparty.dir/third_party/blake3/blake3_portable.c.obj CMakeFiles/whir_thirdparty.dir/third_party/sha256/sha256.c.obj CMakeFiles/whir_thirdparty.dir/third_party/keccak/keccak.c.obj
+C:\MingGw64\mingw64\bin\ranlib.exe libwhir_thirdparty.a

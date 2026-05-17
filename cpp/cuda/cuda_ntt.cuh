@@ -1,0 +1,145 @@
+// =============================================================================
+// cuda_ntt.cuh — CUDA NTT 内核声明与设备端辅助函数
+//
+// 提供 GPU 加速的有限域 NTT (Number Theoretic Transform) 操作:
+//   - Radix-2 蝴蝶内核  (最常用的基 2 变换)
+//   - Twiddle 因子乘法  (6-step 算法的第 4 步)
+//   - 矩阵转置          (6-step 算法的第 1/3/6 步)
+//   - 域元素编码        (域元素 → 字节数组, 用于叶子哈希)
+//
+// 所有内核针对 Goldilocks 64-bit 域 (p = 2^64 - 2^32 + 1) 优化,
+// 使用 128-bit 中间运算处理模乘, 每个 thread 独立处理一对蝴蝶或一个元素。
+//
+// 线程模型:
+//   - 每个 thread block 处理一个独立的 NTT 批次或矩阵块
+//   - blockDim.x = 256 (适配 SM 占用率)
+//   - gridDim 根据数据规模自动计算
+//
+// 要求: CUDA 架构 ≥ 7.0 (Volta+), 编译标志 -arch=sm_75 或更高
+// =============================================================================
+
+#pragma once
+
+#include <cuda_runtime.h>
+#include <cstdint>
+
+// ---------------------------------------------------------------------------
+// Goldilocks 域常量 (与 CPU 端一致)
+// p = 2^64 - 2^32 + 1 = 0xFFFFFFFF00000001
+// R  = 2^64 (Montgomery 乘法的 R 因子)
+// ---------------------------------------------------------------------------
+namespace cuda_goldilocks {
+
+__device__ __constant__ constexpr uint64_t P           = 0xFFFFFFFF00000001ULL;
+__device__ __constant__ constexpr uint64_t MU          = 0xFFFFFFFFULL;  // p 的 Montgomery 逆: -p⁻¹ mod 2^64
+__device__ __constant__ constexpr uint64_t R_SQ_MOD_P  = 0xFFFFFFFE00000001ULL; // R² mod p (用于进入 Montgomery 域)
+
+// ---- 设备端域运算 (内联, 每个函数处理一对或多对元素) ----
+
+/// Montgomery 乘法: a * b * R⁻¹ mod p
+/// 使用 128-bit 中间运算, 对标 CPU 端的 Goldilocks::operator*
+__device__ __forceinline__ uint64_t mont_mul(uint64_t a, uint64_t b) {
+    // 计算 128-bit 乘积: a * b = hi*2^64 + lo
+    // Montgomery 约简: t = lo * MU mod 2^64, result = (a*b + t*p) >> 64
+    // 若 result >= p 则减 p
+    __uint128_t prod = __uint128_t{a} * b;
+    uint64_t lo = static_cast<uint64_t>(prod);
+    uint64_t hi = static_cast<uint64_t>(prod >> 64);
+    uint64_t t  = lo * MU;               // t = -lo/p mod 2^64
+    __uint128_t red = __uint128_t{t} * P + prod;
+    uint64_t result = static_cast<uint64_t>(red >> 64);
+    if (result >= P) result -= P;
+    return result;
+}
+
+/// Montgomery 加法: (a + b) mod p
+__device__ __forceinline__ uint64_t mont_add(uint64_t a, uint64_t b) {
+    uint64_t r = a + b;
+    if (r >= P || r < a) r -= P;  // 进位或溢出 → 减去 p
+    return r;
+}
+
+/// Montgomery 减法: (a - b) mod p
+__device__ __forceinline__ uint64_t mont_sub(uint64_t a, uint64_t b) {
+    if (a < b) return a + P - b;
+    return a - b;
+}
+
+/// 转换为规范表示 (退出 Montgomery 域): a * R⁻¹ mod p → a mod p
+__device__ __forceinline__ uint64_t from_mont(uint64_t a) {
+    return mont_mul(a, 1);
+}
+
+/// 转换为 Montgomery 表示: a → a * R mod p
+__device__ __forceinline__ uint64_t to_mont(uint64_t a) {
+    return mont_mul(a, R_SQ_MOD_P);
+}
+
+} // namespace cuda_goldilocks
+
+// =============================================================================
+// 内核函数声明
+// =============================================================================
+
+/// Radix-2 NTT 蝴蝶内核
+///
+/// 每个 thread 处理一对 (a, b) → (a + b*w, a - b*w)
+/// 输入数组包含多个 size-2 的独立块, grid 覆盖所有块。
+///
+/// @param data    域元素数组 (Montgomery 表示), 原地修改
+/// @param roots   单位根表 (Montgomery 表示), 长度 = n
+/// @param n       每个独立 NTT 批次的元素总数
+/// @param stride  单位根步长: 根表中使用的索引 = (pair_idx % (n/2)) * stride
+__global__ void ntt_radix2_kernel(
+    uint64_t* data, const uint64_t* roots,
+    uint32_t n, uint32_t stride);
+
+/// 四阶 Cooley-Tukey 内核 (合并两层 butterfly + twiddle)
+///
+/// 每个 thread 处理一个独立的 size-4 块.
+/// 比两次 size-2 调用减少了一半的全局内存访问。
+__global__ void ntt_radix4_kernel(
+    uint64_t* data, const uint64_t* roots,
+    uint32_t n, uint32_t stride);
+
+/// Twiddle 因子乘法内核
+///
+/// 6-step NTT 第 4 步: 对 rows×cols 矩阵的第 i 行第 j 列乘以 roots[i*j].
+/// 每个 thread 处理一个矩阵元素 (第 0 行和第 0 列跳过, twiddle=1).
+///
+/// @param data  矩阵数据 (row-major), 原地修改
+/// @param roots 单位根表
+/// @param rows  矩阵行数
+/// @param cols  矩阵列数
+/// @param step  根表缩放步长 = roots_len / (rows*cols)
+__global__ void apply_twiddles_kernel(
+    uint64_t* data, const uint64_t* roots,
+    uint32_t rows, uint32_t cols, uint32_t step);
+
+/// 矩阵转置内核 (out-of-place, 通过共享内存)
+///
+/// 6-step NTT 第 1/3/6 步: 将 rows×cols 矩阵原地转置.
+/// 使用 shared memory tile 优化全局内存合并访问.
+///
+/// @param data  矩阵数据 (row-major, rows×cols 个元素)
+/// @param rows  原始行数
+/// @param cols  原始列数
+__global__ void transpose_kernel(
+    uint64_t* data, uint32_t rows, uint32_t cols);
+
+/// 域元素编码内核: 将 Montgomery 域元素转为 LE 字节
+///
+/// 每个 thread 处理一个域元素.
+/// 对标 CPU 端的 write_u64_le(Goldilocks::as_canonical_u64()).
+///
+/// @param values  域元素数组 (Montgomery 表示)
+/// @param out     输出字节数组 (每元素 8 字节, LE)
+/// @param count   元素个数
+__global__ void encode_to_bytes_kernel(
+    const uint64_t* values, uint8_t* out, uint32_t count);
+
+/// GoldilocksExt3 编码内核: 三个基域分量分别编码
+/// 每元素 24 字节 = c0(8B) + c1(8B) + c2(8B), 均为 LE
+__global__ void encode_ext3_to_bytes_kernel(
+    const uint64_t* c0, const uint64_t* c1, const uint64_t* c2,
+    uint8_t* out, uint32_t count);

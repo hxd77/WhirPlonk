@@ -1,0 +1,7 @@
+# SECTION pow
+CASE 0 blake3-thr60bits threshold=1152921504606846976
+  nonce 42
+  hash e088e1f8abe4b40f4580ad35074e7c55c4eb93053fec691e09200960193546de
+CASE 1 sha2-thr60bits threshold=1152921504606846976
+  nonce 38
+  hash 4fece30a85e4f30e6bdfb09ca53489ee42de0c1bb4205af5842f4c06563866a6
