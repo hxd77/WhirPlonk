@@ -16,6 +16,7 @@ rustc-ice-*.txt
 profile.json.gz
 
 # C++ build artifacts
+/build_mingw/
 /cpp/build/
 /cpp/tests/build/
 /cpp/tests/*.exe

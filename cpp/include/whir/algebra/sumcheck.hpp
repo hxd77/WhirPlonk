@@ -99,7 +99,6 @@ void fold(std::vector<F>& values, F weight) {
     //将数组大小截断为half
     values.resize(half);
     //释放被抛弃部分的内存 
-    values.shrink_to_fit();
 }
 
 //计算一个多变量的多线性在特定点的值 
