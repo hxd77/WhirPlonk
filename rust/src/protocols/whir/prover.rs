@@ -1,4 +1,4 @@
-use std::{any::Any, borrow::Cow, mem};
+use std::{any::Any, borrow::Cow, mem, time::Instant};
 
 use ark_ff::{AdditiveGroup, FftField, Field};
 use ark_std::rand::{CryptoRng, RngCore};
@@ -101,6 +101,7 @@ where
         }
 
         // Complete evaluations of EVERY vector at EVERY linear form.
+        let t_oods = Instant::now();
         let (oods_evals, oods_matrix) = {
             let mut oods_evals = Vec::new();
             let mut oods_matrix = Vec::new();
@@ -132,8 +133,10 @@ where
             }
             (oods_evals, oods_matrix)
         };
+        eprintln!("[PROFILE] prove::OOD_cross_terms: {:.1?}", t_oods.elapsed());
 
         // Random linear combination of the vectors.
+        let t_rlc = Instant::now();
         let mut vector_rlc_coeffs: Vec<M::Target> = geometric_challenge(prover_state, num_vectors);
         assert_eq!(vector_rlc_coeffs[0], M::Target::ONE);
         // Recycle the first input as the accumulator (its coefficient is always ONE).
@@ -148,8 +151,10 @@ where
         }
 
         let mut prev_witness: RoundWitness<'a, M::Target, M> = RoundWitness::Initial(witnesses);
+        eprintln!("[PROFILE] prove::vector_RLC: {:.1?}", t_rlc.elapsed());
 
         // Random linear combination of the constraints.
+        let t_constraint = Instant::now();
         let constraint_rlc_coeffs: Vec<M::Target> =
             geometric_challenge(prover_state, linear_forms.len() + oods_evals.len());
         let has_constraints = !constraint_rlc_coeffs.is_empty();
@@ -197,8 +202,10 @@ where
         drop(oods_matrix);
 
         debug_assert!(!has_constraints || dot(&vector, &covector) == the_sum);
+        eprintln!("[PROFILE] prove::constraint_RLC_sum: {:.1?}", t_constraint.elapsed());
 
         // Run initial sumcheck on batched vectors with combined statement
+        let t_init_sumcheck = Instant::now();
         let mut folding_randomness = if has_constraints {
             self.initial_sumcheck
                 .prove(prover_state, &mut vector, &mut covector, &mut the_sum)
@@ -221,16 +228,25 @@ where
         let mut evaluation_point = folding_randomness.0.clone();
 
         debug_assert_eq!(dot(&vector, &covector), the_sum);
+        eprintln!("[PROFILE] prove::initial_sumcheck: {:.1?}", t_init_sumcheck.elapsed());
 
         // Execute standard WHIR rounds on the batched vectors
+        let t_stir_total = Instant::now();
         for (round_index, round_config) in self.round_configs.iter().enumerate() {
+            let t_round = Instant::now();
+
             // Commit to the vector, this generates out-of-domain evaluations.
+            let t = Instant::now();
             let new_witness = round_config.irs_committer.commit(prover_state, &[&vector]);
+            eprintln!("[PROFILE] prove::round{}_irs_commit: {:.1?}", round_index, t.elapsed());
 
             // Proof of work before in-domain challenges
+            let t = Instant::now();
             round_config.pow.prove(prover_state);
+            eprintln!("[PROFILE] prove::round{}_pow: {:.1?}", round_index, t.elapsed());
 
             // Open the previous round's witness.
+            let t = Instant::now();
             let in_domain = match prev_witness {
                 RoundWitness::Initial(init_witnesses) => {
                     let witness_refs: Vec<&_> = init_witnesses.iter().map(|c| &**c).collect();
@@ -245,6 +261,7 @@ where
                         .open(prover_state, &[&old_witness])
                 }
             };
+            eprintln!("[PROFILE] prove::round{}_open: {:.1?}", round_index, t.elapsed());
 
             // Collect constraints for this round and RLC them in
             let stir_challenges = new_witness
@@ -270,17 +287,21 @@ where
             debug_assert_eq!(dot(&vector, &covector), the_sum);
 
             // Run sumcheck for this round
+            let t = Instant::now();
             folding_randomness =
                 round_config
                     .sumcheck
                     .prove(prover_state, &mut vector, &mut covector, &mut the_sum);
+            eprintln!("[PROFILE] prove::round{}_sumcheck: {:.1?}", round_index, t.elapsed());
 
             evaluation_point.extend(folding_randomness.0.iter().copied());
             debug_assert_eq!(dot(&vector, &covector), the_sum);
 
             prev_witness = RoundWitness::Round(new_witness);
             vector_rlc_coeffs = vec![M::Target::ONE];
+            eprintln!("[PROFILE] prove::round{}_total: {:.1?}", round_index, t_round.elapsed());
         }
+        eprintln!("[PROFILE] prove::STIR_rounds_total: {:.1?}", t_stir_total.elapsed());
 
         // Directly send the vector to the verifier.
         assert_eq!(vector.len(), self.final_sumcheck.initial_size);
@@ -289,9 +310,12 @@ where
         }
 
         // PoW
+        let t = Instant::now();
         self.final_pow.prove(prover_state);
+        eprintln!("[PROFILE] prove::final_pow: {:.1?}", t.elapsed());
 
         // Open and consume the final previous witness.
+        let t = Instant::now();
         match prev_witness {
             RoundWitness::Initial(init_witnesses) => {
                 let witness_refs: Vec<&_> = init_witnesses.iter().map(|c| &**c).collect();
@@ -304,11 +328,14 @@ where
                     .open(prover_state, &[&old_witness]);
             }
         }
+        eprintln!("[PROFILE] prove::final_open: {:.1?}", t.elapsed());
 
         // Final sumcheck
+        let t = Instant::now();
         let final_folding_randomness =
             self.final_sumcheck
                 .prove(prover_state, &mut vector, &mut covector, &mut the_sum);
+        eprintln!("[PROFILE] prove::final_sumcheck: {:.1?}", t.elapsed());
         evaluation_point.extend(final_folding_randomness.0.iter().copied());
 
         FinalClaim {

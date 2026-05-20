@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 using F = ::whir::algebra::Goldilocks;

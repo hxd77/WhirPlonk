@@ -60,6 +60,20 @@ target_link_libraries(demo_irs_commit PRIVATE whir_algebra)
 add_executable(demo_open_verify ../demo/demo_open_verify.cpp)
 target_link_libraries(demo_open_verify PRIVATE whir_algebra)
 
+# CUDA 构建时, 所有 dump/demo 目标也需链接 whir_cuda (NTT 头文件中有 CUDA dispatch)
+if(WHIR_CUDA)
+    foreach(_dump_target
+        dump_golden_algebra
+        dump_algebra_fields dump_algebra_utils dump_algebra_ntt
+        dump_hash dump_merkle_tree dump_pow dump_matrix_commit
+        dump_irs_commit dump_sumcheck dump_transcript dump_rng
+        dump_whir dump_whir_zk
+        demo_irs_commit demo_open_verify
+    )
+        target_link_libraries(${_dump_target} PRIVATE whir_cuda)
+    endforeach()
+endif()
+
 # ============================================================
 # GoogleTest (通过 FetchContent, 配置时下载)
 # ============================================================

@@ -1,0 +1,178 @@
+{
+  "tests": 20,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "NttGenerator",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "ReturnsRootForValidSize",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 44
+        },
+        {
+          "name": "ReturnsNulloptForInvalidSize",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 51
+        },
+        {
+          "name": "SizeOneReturnsOne",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 56
+        }
+      ]
+    },
+    {
+      "name": "InterleavedRsEncode",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "BasicEncoding",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 66
+        }
+      ]
+    },
+    {
+      "name": "ChallengeIndices",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "EmptyCount",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 85
+        },
+        {
+          "name": "SingleLeaf",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 91
+        },
+        {
+          "name": "DedupWorks",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 100
+        },
+        {
+          "name": "NoDedupKeepsAll",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 107
+        }
+      ]
+    },
+    {
+      "name": "MerkleTree",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "BasicTree",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 118
+        }
+      ]
+    },
+    {
+      "name": "ProofOfWork",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "ZeroDifficulty",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 150
+        },
+        {
+          "name": "FindNonceZeroDifficulty",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 160
+        },
+        {
+          "name": "ThresholdRoundTrip",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 169
+        }
+      ]
+    },
+    {
+      "name": "SumcheckIntegration",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "ProveVerifyCycle",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 190
+        },
+        {
+          "name": "EmptySumcheck",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 223
+        }
+      ]
+    },
+    {
+      "name": "TranscriptIntegration",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "RoundTrip",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 254
+        }
+      ]
+    },
+    {
+      "name": "GeometricChallenge",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "ProducesGeometricSequence",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 282
+        }
+      ]
+    },
+    {
+      "name": "IrsCommitIntegration",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "CommitAndVerify",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 301
+        }
+      ]
+    },
+    {
+      "name": "EndToEnd",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "MiniSumcheckToIrsCommit",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 348
+        }
+      ]
+    },
+    {
+      "name": "WhirIntegration",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "FullProveVerifyCycle",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 380
+        }
+      ]
+    },
+    {
+      "name": "ZkWhirIntegration",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "FullProveVerifyCycle",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_protocols.cpp",
+          "line": 461
+        }
+      ]
+    }
+  ]
+}

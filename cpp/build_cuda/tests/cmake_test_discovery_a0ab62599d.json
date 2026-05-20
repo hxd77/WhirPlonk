@@ -1,0 +1,22 @@
+{
+  "tests": 2,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "CudaNtt",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "MatchesCpuForRandomGoldilocksInputs",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_cuda_ntt.cpp",
+          "line": 75
+        },
+        {
+          "name": "MatchesCpuForSpecialValues",
+          "file": "C:\\Users\\DELL\\Desktop\\WhirPlonk\\cpp\\tests\\test_cuda_ntt.cpp",
+          "line": 89
+        }
+      ]
+    }
+  ]
+}

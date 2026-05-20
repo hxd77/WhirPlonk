@@ -1,0 +1,5 @@
+if(EXISTS "C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cross_language_golden/tests/test_protocols[1]_tests.cmake")
+  include("C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cross_language_golden/tests/test_protocols[1]_tests.cmake")
+else()
+  add_test(test_protocols_NOT_BUILT test_protocols_NOT_BUILT)
+endif()

@@ -1,0 +1,5 @@
+add_test([=[CudaMerklePath.MatchesCpuOpenPathHints]=]  C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cuda/tests/test_cuda_merkle_path.exe [==[--gtest_filter=CudaMerklePath.MatchesCpuOpenPathHints]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[CudaMerklePath.MatchesCpuOpenPathHints]=]  PROPERTIES DEF_SOURCE_LINE [==[C:\Users\DELL\Desktop\WhirPlonk\cpp\tests\test_cuda_merkle_path.cpp:56]==] WORKING_DIRECTORY C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cuda/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[CudaMerklePath.TranscriptOpenVerifyLargeTree]=]  C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cuda/tests/test_cuda_merkle_path.exe [==[--gtest_filter=CudaMerklePath.TranscriptOpenVerifyLargeTree]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[CudaMerklePath.TranscriptOpenVerifyLargeTree]=]  PROPERTIES DEF_SOURCE_LINE [==[C:\Users\DELL\Desktop\WhirPlonk\cpp\tests\test_cuda_merkle_path.cpp:98]==] WORKING_DIRECTORY C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cuda/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+set(  test_cuda_merkle_path_TESTS CudaMerklePath.MatchesCpuOpenPathHints CudaMerklePath.TranscriptOpenVerifyLargeTree)

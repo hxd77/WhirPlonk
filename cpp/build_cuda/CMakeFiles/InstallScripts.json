@@ -1,0 +1,11 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cuda/cmake_install.cmake",
+		"C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cuda/tests/cmake_install.cmake",
+		"C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cuda/_deps/googletest-build/cmake_install.cmake",
+		"C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cuda/_deps/googletest-build/googlemock/cmake_install.cmake",
+		"C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cuda/_deps/googletest-build/googletest/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

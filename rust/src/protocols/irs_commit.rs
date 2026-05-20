@@ -312,12 +312,17 @@ where
         assert!(vectors.iter().all(|p| p.len() == self.vector_size));
 
         // Interleaved RS Encode the vectorss
+        let t = std::time::Instant::now();
         let matrix = interleaved_rs_encode(vectors, self.codeword_length, self.interleaving_depth);
+        eprintln!("[PROFILE] irs_commit::RS_encode: {:.1?}", t.elapsed());
 
         // Commit to the matrix
+        let t = std::time::Instant::now();
         let matrix_witness = self.matrix_commit.commit(prover_state, &matrix);
+        eprintln!("[PROFILE] irs_commit::matrix_commit: {:.1?}", t.elapsed());
 
         // Handle out-of-domain points and values
+        let t = std::time::Instant::now();
         let oods_points: Vec<M::Target> =
             prover_state.verifier_message_vec(self.out_domain_samples);
         let mut oods_matrix = Vec::with_capacity(self.out_domain_samples * self.num_vectors);
@@ -328,6 +333,7 @@ where
                 oods_matrix.push(value);
             }
         }
+        eprintln!("[PROFILE] irs_commit::OOD_eval: {:.1?}", t.elapsed());
 
         Witness {
             matrix,

@@ -225,10 +225,15 @@ impl<T: TypeInfo + Encodable + Send + Sync> Config<T> {
         // Compute leaf hashes
         let mut leaves = Vec::with_capacity(self.merkle_tree.num_nodes());
         leaves.resize(self.merkle_tree.num_leaves, Hash::default());
+        let t = std::time::Instant::now();
         hash_rows(&*engine, matrix, &mut leaves[..self.num_rows()]);
+        eprintln!("[PROFILE] matrix_commit::hash_rows: {:.1?}", t.elapsed());
 
         // Commit the leaf hashes
-        self.merkle_tree.commit(prover_state, leaves)
+        let t = std::time::Instant::now();
+        let result = self.merkle_tree.commit(prover_state, leaves);
+        eprintln!("[PROFILE] matrix_commit::merkle_tree: {:.1?}", t.elapsed());
+        result
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]

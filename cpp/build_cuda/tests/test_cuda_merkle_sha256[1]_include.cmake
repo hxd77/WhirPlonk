@@ -1,0 +1,5 @@
+if(EXISTS "C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cuda/tests/test_cuda_merkle_sha256[1]_tests.cmake")
+  include("C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cuda/tests/test_cuda_merkle_sha256[1]_tests.cmake")
+else()
+  add_test(test_cuda_merkle_sha256_NOT_BUILT test_cuda_merkle_sha256_NOT_BUILT)
+endif()
