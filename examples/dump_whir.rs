@@ -24,8 +24,7 @@ use whir::algebra::{
 };
 use whir::hash::SHA2;
 use whir::protocols::{
-    irs_commit, matrix_commit, merkle_tree, proof_of_work, sumcheck,
-    whir as whir_mod,
+    irs_commit, matrix_commit, merkle_tree, proof_of_work, sumcheck, whir as whir_mod,
 };
 use whir::transcript::{
     codecs::Empty, DomainSeparator, ProverState, VerifierMessage, VerifierState,
@@ -35,24 +34,35 @@ type F = Field64;
 
 fn dump_bytes(label: &str, data: &[u8]) {
     print!("    {label} ");
-    for byte in data { print!("{byte:02x}"); }
+    for byte in data {
+        print!("{byte:02x}");
+    }
     println!();
 }
 
 fn dump_field_vec(label: &str, vec: &[F]) {
     print!("    {label}");
-    for v in vec { print!(" {v}"); }
+    for v in vec {
+        print!(" {v}");
+    }
     println!();
 }
 
 struct Lcg(u64);
 impl Lcg {
-    fn new(seed: u64) -> Self { Self(seed) }
+    fn new(seed: u64) -> Self {
+        Self(seed)
+    }
     fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0
     }
-    fn next_field64(&mut self) -> F { F::from(self.next_u64()) }
+    fn next_field64(&mut self) -> F {
+        F::from(self.next_u64())
+    }
 }
 
 /// 为每个 case 构造独立的 DomainSeparator (session 不同, 区分海绵状态)
@@ -64,12 +74,7 @@ fn make_ds(label: &str) -> DomainSeparator<'static, Empty> {
 }
 
 /// 运行单个 WHIR 测试 case
-fn run_case(
-    case_id: usize,
-    num_vectors: usize,
-    vector_size: usize,
-    rng: &mut Lcg,
-) {
+fn run_case(case_id: usize, num_vectors: usize, vector_size: usize, rng: &mut Lcg) {
     let depth: usize = 1;
     let cw = vector_size * 2;
     let num_cols = num_vectors * depth;
@@ -86,15 +91,14 @@ fn run_case(
     for vi in 0..num_vectors {
         let v: Vec<F> = (0..vector_size).map(|_| rng.next_field64()).collect();
         dump_field_vec(&format!("input_vector{vi}"), &v);
-        evals.push(v.iter().sum());  // 全 1 线性形式在每向量上的求值 = sum(coeffs)
+        evals.push(v.iter().sum()); // 全 1 线性形式在每向量上的求值 = sum(coeffs)
         vecs.push(v);
     }
     let vec_slices: Vec<&[F]> = vecs.iter().map(|v| v.as_slice()).collect();
 
     // 一个全 1 线性形式, 对每个多项式做一个求值
     let cv = (0..vector_size).map(|_| F::ONE).collect::<Vec<_>>();
-    let lfs: Vec<Box<dyn LinearForm<F>>> =
-        vec![Box::new(Covector { vector: cv })];
+    let lfs: Vec<Box<dyn LinearForm<F>>> = vec![Box::new(Covector { vector: cv })];
 
     // ---- 2. 协议配置 ----
     let mt = merkle_tree::Config::with_hash(SHA2, cw);
@@ -119,14 +123,23 @@ fn run_case(
     let sc_init = sumcheck::Config::<F> {
         field: Default::default(),
         initial_size: vector_size,
-        round_pow: proof_of_work::Config { hash_id: SHA2, threshold: u64::MAX },
+        round_pow: proof_of_work::Config {
+            hash_id: SHA2,
+            threshold: u64::MAX,
+        },
         num_rounds: 0,
     };
-    let skip_pow = proof_of_work::Config { hash_id: SHA2, threshold: u64::MAX };
+    let skip_pow = proof_of_work::Config {
+        hash_id: SHA2,
+        threshold: u64::MAX,
+    };
     let sc_final = sumcheck::Config::<F> {
         field: Default::default(),
         initial_size: vector_size,
-        round_pow: proof_of_work::Config { hash_id: SHA2, threshold: u64::MAX },
+        round_pow: proof_of_work::Config {
+            hash_id: SHA2,
+            threshold: u64::MAX,
+        },
         num_rounds: log_vs,
     };
 
@@ -136,7 +149,10 @@ fn run_case(
         initial_skip_pow: skip_pow,
         round_configs: vec![],
         final_sumcheck: sc_final,
-        final_pow: proof_of_work::Config { hash_id: SHA2, threshold: u64::MAX },
+        final_pow: proof_of_work::Config {
+            hash_id: SHA2,
+            threshold: u64::MAX,
+        },
     };
 
     // ---- 3. DomainSeparator ----
@@ -153,10 +169,7 @@ fn run_case(
     let witnesses: Vec<Cow<irs_commit::Witness<F, F>>> = vec![Cow::Owned(witness)];
     let vec_cows: Vec<Cow<[F]>> = vec_slices.iter().map(|v| Cow::Borrowed(*v)).collect();
 
-    let claim = whir_config.prove(
-        &mut ps, vec_cows, witnesses,
-        lfs, Cow::Borrowed(&evals),
-    );
+    let claim = whir_config.prove(&mut ps, vec_cows, witnesses, lfs, Cow::Borrowed(&evals));
     let proof = ps.proof();
 
     dump_field_vec("eval_point", &claim.evaluation_point);

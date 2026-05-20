@@ -62,7 +62,10 @@
       "Bash(cmake --build . --config Release --target dump_whir)",
       "Bash(cmake --build . --config Release)",
       "Bash(rm -rf *)",
-      "Bash(cmake .. -G \"MinGW Makefiles\" -DCMAKE_BUILD_TYPE=Release)"
+      "Bash(cmake .. -G \"MinGW Makefiles\" -DCMAKE_BUILD_TYPE=Release)",
+      "Bash(nvcc --version)",
+      "Bash(nvidia-smi)",
+      "Bash(nvidia-smi *)"
     ]
   }
 }

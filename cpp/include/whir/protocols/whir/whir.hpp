@@ -1,35 +1,19 @@
 #pragma once
 
-// =============================================================================
-// whir.hpp — WHIR 协议核心类型定义。
-// 对应 WHIR 中的 src/protocols/whir/mod.rs 和 src/protocols/whir/config.rs。
+// ============================================================================
+// whir.hpp — WHIR 协议核心类型定义
 //
-// WHIR (Witness-Hiding Interleaved Reed-Solomon) 是多项式 IOP 协议族:
-//   1. 把多个多项式的承诺 (IRS commit) 组合成一个"大声明"
-//   2. 通过逐轮折叠 (STIR) 把声明缩减到越来越小的域
-//   3. 最终用一个轻量级 sumcheck 验证折叠后的剩余声明
+// WHIR（Witness-Hiding Interleaved Reed-Solomon）是多项式 IOP 协议族：
+//   1. 通过 IRS 编码 + Merkle 树承诺多个多项式
+//   2. 逐轮 STIR 折叠缩减域大小
+//   3. 最终轻量级 sumcheck 验证
 //
-// 核心类型:
-//   RoundConfig<F>  — 单轮 WHIR 配置 (IRS 承诺器 + Sumcheck + PoW)
-//   Config<M>       — 全局配置, 包含初始/最终/逐轮的协议参数
-//   FinalClaim<F>   — WHIR 验证的最终声明 (求值点 + RLC 系数)
-//   Witness<F,M>    — 类型别名, 指向 irs_commit::Witness
-//   Commitment<F>   — 类型别名, 指向 irs_commit::Commitment
+// 数据流:
+//   证明者: vectors → commit → prove(STIR fold → sumcheck) → FinalClaim
+//   验证者: receive_commitment → verify(STIR fold → sumcheck) → FinalClaim.verify
 //
-// 数据流 (简化):
-//   Prover:
-//     vectors → commit(Merkle树) → prove(逐轮 STIR fold → sumcheck)
-//     → open(域内挑战) → FinalClaim
-//
-//   Verifier:
-//     receive_commitment → verify(逐轮 STIR fold → sumcheck验证)
-//     → FinalClaim.verify(linear_forms)
-//
-// 安全模型:
-//   - 唯一解码模式 (unique_decoding=true): 每个 IRS 使用唯一解码参数
-//   - 列表解码模式: 允许更大的码率范围, 借助 Johnson 边界
-//   - PoW (Proof of Work) 用于抵抗 Grinding 攻击
-// =============================================================================
+// 对应 Rust 文件: src/protocols/whir/{mod.rs, config.rs}
+// ============================================================================
 
 #include "../../algebra/embedding.hpp"
 #include "../../algebra/linear_form.hpp"
@@ -42,6 +26,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -51,6 +36,8 @@ namespace whir::protocols::whir {
 template <typename F>
 struct FinalClaim;
 
+// 移动赋值 IRS 配置。构造 Config 时用于填充初始和逐轮 committer，
+// 避免拷贝 Merkle 层向量。
 template <typename M>
 void assign_irs_config(
     irs_commit::Config<M>& dst,
@@ -70,76 +57,61 @@ void assign_irs_config(
     dst.deduplicate_in_domain = src.deduplicate_in_domain;
 }
 
-// =============================================================================
-// RoundConfig<F> — 单轮 WHIR 配置。
+// ============================================================================
+// RoundConfig<F> — 单轮 WHIR 配置
 //
-// 每一轮 WHIR 包含三个子协议:
-//   irs_committer — IRS 承诺配置 (对当前折叠向量的 RS 编码 + Merkle 树)
-//   sumcheck      — Sumcheck 配置 (验证折叠后的声明)
-//   pow           — Proof of Work 配置 (抵抗 Grinding 攻击)
-//
-// 每轮的数据流:
-//   承诺新向量 → PoW → 打开前轮见证 → STIR 约束收集 → Sumcheck
-// =============================================================================
+// 每轮依次执行三个子协议:
+//   IRS commit → PoW → 开启前一轮 witness → STIR 约束收集 → Sumcheck
+// ============================================================================
 
 template <typename F>
 struct RoundConfig {
-    // IRS 承诺器: 对当前轮的向量做 RS 编码 + Merkle 树承诺
-    // Identity<F> 表示基域和扩展域相同 (域内/域外用同一域)
+    // 当前轮折叠向量的 IRS 承诺器（RS 编码 + Merkle 树）
+    // Identity<F> 表示基域和扩域相同（域内/域外共享同一域）
     irs_commit::Config<::whir::algebra::Identity<F>> irs_committer;
 
-    // Sumcheck 配置: 验证折叠后声明的正确性
+    // 验证折叠后声明的 sumcheck 配置
     sumcheck::Config<F> sumcheck;
 
-    // PoW 配置: 反 Grinding, 确保 prover 不能通过反复尝试找到有利的挑战
+    // 抗 grinding 攻击的工作量证明
     pow::PowConfig pow;
 };
 
-// =============================================================================
-// Config<M> — WHIR 协议全局配置。
+// ============================================================================
+// Config<M> — WHIR 协议全局配置
 //
-// 模板参数 M: 嵌入映射 F → G (基域 → 扩展域)。
+// 模板参数 M: 嵌入映射 F → G（基域 → 扩域）
 //
-// 配置分层:
-//   initial_committer  — 初始 IRS 承诺 (对原始输入向量)
-//   initial_sumcheck   — 初始 Sumcheck (对原始声明)
-//   round_configs      — 逐轮配置列表 (每轮包括 IRS + Sumcheck + PoW)
-//   final_sumcheck     — 最终 Sumcheck (折叠到最小域后的验证)
-//   final_pow          — 最终 PoW
-//
-// 关键方法:
-//   from_params(size, params)     — 从 ProtocolParameters 构造完整配置
-//   commit(prover_state, vectors) — 委托给 initial_committer.commit()
-//   receive_commitment(vs)        — 委托给 initial_committer.receive_commitment()
-//   prove(prover_state, ...)      — 完整 WHIR 证明 (定义在 whir_prover.hpp)
-//   verify(verifier_state, ...)   — 完整 WHIR 验证 (定义在 whir_verifier.hpp)
-// =============================================================================
+// 分层结构:
+//   initial_committer / initial_sumcheck — 处理原始输入向量
+//   round_configs[]                     — 逐轮 IRS + Sumcheck + PoW
+//   final_sumcheck / final_pow          — 折叠至最简域后执行
+// ============================================================================
 
 template <typename M>
 struct Config {
-    using Source = typename M::Source;   // 基域类型 (F)
-    using Target = typename M::Target;   // 扩展域类型 (G)
+    using Source = typename M::Source;   // 基域 F
+    using Target = typename M::Target;   // 扩域 G
 
     // ---- 初始阶段 ----
-    irs_commit::Config<M> initial_committer;   // 初始 IRS 承诺配置
-    sumcheck::Config<Target> initial_sumcheck; // 初始 Sumcheck 配置
-    pow::PowConfig initial_skip_pow;           // 无约束时跳过的占位 PoW
+    irs_commit::Config<M> initial_committer;
+    sumcheck::Config<Target> initial_sumcheck;
+    pow::PowConfig initial_skip_pow;           // 无约束时的占位 PoW
 
     // ---- 逐轮阶段 ----
-    std::vector<RoundConfig<Target>> round_configs; // 每轮的配置
+    std::vector<RoundConfig<Target>> round_configs;
 
     // ---- 最终阶段 ----
-    sumcheck::Config<Target> final_sumcheck;  // 最终 Sumcheck
-    pow::PowConfig final_pow;                 // 最终 PoW
+    sumcheck::Config<Target> final_sumcheck;
+    pow::PowConfig final_pow;
 
     // -------------------------------------------------------------------------
-    // from_params(size, params) — 从协议参数构造完整配置。
+    // 从协议参数构造完整 Config。
     //
-    // 输入:
-    //   size   — 初始多项式长度 (变量数)
-    //   params — ProtocolParameters, 包含安全目标、码率、folding factor 等
+    // size   — 初始多项式长度（必须是 2 的幂）
+    // params — ProtocolParameters（安全等级、码率、折叠因子等）
     //
-    // 输出: Config 实例 (具体数值计算由调用方完成)
+    // PoW 难度由目标安全级别与各子协议阶段 RBR 可靠性之间的差值推导。
     //
     // 对应 Rust: Config::new(size, params)
     // -------------------------------------------------------------------------
@@ -158,6 +130,7 @@ struct Config {
         std::size_t num_vars = 0;
         { std::size_t sz = size; while (sz > 1) { sz >>= 1; ++num_vars; } }
 
+        // PoW 配置工厂: 难度（比特）→ 阈值
         auto pow_cfg = [&](double diff) -> pow::PowConfig {
             pow::PowConfig p;
             p.hash_id = params.hash_id;
@@ -172,11 +145,13 @@ struct Config {
             params.batch_size, size, 1 << params.initial_folding_factor,
             initial_rate, field_size_bits));
 
+        // 初始折叠 PoW: gap = security - min(proximity_gap, field_bits - log(list_size) - 1)
         double starting_folding_pow_bits = [&]() {
             double pg = c.initial_committer.rbr_soundness_fold_prox_gaps(field_size_bits);
             double ll = std::log2(c.initial_committer.list_size());
             return std::max(security - std::min(pg, field_size_bits - ll - 1.0), 0.0);
         }();
+        // 跳过 PoW: 无约束声明时使用（仅保证 transcript 一致性）
         double skip_pow_bits = [&]() {
             double pg = c.initial_committer.rbr_soundness_fold_prox_gaps(field_size_bits)
                 + std::log2(static_cast<double>(params.initial_folding_factor));
@@ -193,6 +168,7 @@ struct Config {
         double qe = c.initial_committer.rbr_queries();
         num_vars -= params.initial_folding_factor;
 
+        // 构建逐轮配置: 每轮将域减半（消耗 folding_factor 个变量）
         while (num_vars >= params.folding_factor) {
             std::size_t rff = (rd == 0) ? params.initial_folding_factor : params.folding_factor;
             std::size_t nli = log_inv_rate + (rff - 1);
@@ -204,6 +180,7 @@ struct Config {
                     protocol_security, params.unique_decoding, params.hash_id,
                     1, 1 << num_vars, 1 << params.folding_factor, rr, field_size_bits));
 
+            // 组合绑定误差: min(query_entropy, coll_bound_error)
             double cbe = [&]() {
                 double ll = std::log2(rc.irs_committer.list_size());
                 std::size_t cnt = rc.irs_committer.out_domain_samples + ids;
@@ -232,12 +209,12 @@ struct Config {
             ? c.initial_committer.rbr_queries()
             : c.round_configs.back().irs_committer.rbr_queries();
 
-        //fpb2:最终打开PoW位(补齐security-rbr_e的缺口)
+        // 最终开启 PoW: 覆盖 security - rbr_e 差距
         double fpb2 = std::max(security - rbr_e, 0.0);
-        //ffpb:最终折叠PoW位(补齐security-field_size+1的缺口)
+        // 最终折叠 PoW: 覆盖 security - field_size_bits + 1 差距
         double ffpb = std::max(security - field_size_bits + 1.0, 0.0);
 
-        //对最终sumcheck对剩余的num_vars个变量做完整折叠
+        // 最终 sumcheck 折叠剩余 num_vars 个变量至完成
         c.final_sumcheck.initial_size = 1 << num_vars;
         c.final_sumcheck.num_rounds = num_vars;
         c.final_sumcheck.round_pow = pow_cfg(ffpb);
@@ -246,12 +223,7 @@ struct Config {
         return c;
     }
 
-    // -------------------------------------------------------------------------
-    // unique_decoding() — 检查所有子配置是否均为唯一解码模式。
-    //
-    // 输出: true 当且仅当 initial_committer 和所有 round 的 irs_committer
-    //       都使用唯一解码 (无域外采样, 无 Johnson 松弛)
-    // -------------------------------------------------------------------------
+    // 检查所有子配置是否使用唯一解码（无列表解码）
     bool unique_decoding() const {
         if (!initial_committer.unique_decoding()) return false;
         for (const auto& r : round_configs)
@@ -261,16 +233,19 @@ struct Config {
 
     const M* embedding() const { return initial_committer.embedding(); }
 
-    // 初始向量大小 (变量数 = log2(initial_size))
     std::size_t initial_size() const { return initial_committer.vector_size; }
-
-    // 最终折叠后的大小
     std::size_t final_size() const { return final_sumcheck.final_size(); }
-
-    // 折叠轮数 = |round_configs|
     std::size_t n_rounds() const { return round_configs.size(); }
 
-    // 安全分析 (简化版, 与 Rust security_level() 对齐)
+    // -------------------------------------------------------------------------
+    // 安全性分析（简化版，与 Rust security_level() 对齐）
+    //
+    // 计算所有可靠性瓶颈项的最小值:
+    //   - 域大小约束（向量数 / 线性形式数）
+    //   - OOD 采样误差（仅列表解码）
+    //   - 逐轮: 组合绑定误差 + PoW、折叠邻近性 + PoW
+    //   - 最终: 查询熵 + PoW、最终 sumcheck 折叠 + PoW
+    // -------------------------------------------------------------------------
     double security_level(std::size_t num_vectors, std::size_t num_linear_forms) const {
         double field_size_bits = Target::field_size_bits;
         double sec = 1e308; // INFINITY
@@ -282,7 +257,7 @@ struct Config {
         if (!initial_committer.unique_decoding())
             sec = std::min(sec, initial_committer.rbr_ood_sample(field_size_bits));
 
-        // Initial fold error
+        // 初始折叠误差
         double prox = initial_committer.rbr_soundness_fold_prox_gaps(field_size_bits);
         double logL = std::log2(initial_committer.list_size());
         double init_fold = std::min(prox, field_size_bits - logL - 1.0)
@@ -318,18 +293,12 @@ struct Config {
     }
 
     // -------------------------------------------------------------------------
-    // commit(prover_state, vectors) — IRS 承诺 (prover 侧)。
+    // IRS 承诺（证明者端）。委托给 initial_committer.commit()。
     //
-    // 输入:
-    //   prover_state — ProverState (Fiat-Shamir transcript)
-    //   vectors      — 原始向量列表 (num_vectors 个, 每个长度 = initial_size)
+    // prover_state — Fiat-Shamir transcript
+    // vectors      — 输入向量 (num_vectors x initial_size)
     //
-    // 输出: irs_commit::Witness<Source, Target>
-    //       - matrix: RS 编码矩阵 (codeword_length × num_cols)
-    //       - matrix_witness: Merkle 树见证 (完整节点)
-    //       - out_of_domain: 域外采样 + 求值
-    //
-    // 此函数直接委托给 initial_committer.commit()
+    // 返回: Witness，包含 RS 编码矩阵、Merkle 树、OOD 求值
     // -------------------------------------------------------------------------
     template <typename Transcript>
     irs_commit::Witness<Source, Target> commit(
@@ -340,15 +309,11 @@ struct Config {
     }
 
     // -------------------------------------------------------------------------
-    // receive_commitment(verifier_state) — 接收承诺 (verifier 侧)。
+    // 接收承诺（验证者端）。委托给 initial_committer.receive_commitment()。
     //
-    // 输入: verifier_state — VerifierState (已加载 proof 的 transcript)
+    // verifier_state — 包含已加载证明的 transcript
     //
-    // 输出: irs_commit::Commitment<Target>
-    //       - matrix_commitment: Merkle 树根哈希
-    //       - out_of_domain: 域外采样点 (确定性重放) + 域外求值
-    //
-    // 此函数直接委托给 initial_committer.receive_commitment()
+    // 返回: Commitment，包含 Merkle 根 + OOD 求值点和值
     // -------------------------------------------------------------------------
     template <typename Transcript>
     irs_commit::Commitment<Target> receive_commitment(
@@ -358,19 +323,15 @@ struct Config {
     }
 
     // -------------------------------------------------------------------------
-    // prove(prover_state, vectors, witnesses, linear_forms, evaluations)
-    //   — WHIR 完整证明 (prover 侧, 10 步)。
+    // 完整 WHIR 证明（证明者端）。实现在 whir_prover.hpp。
     //
-    // 输入:
-    //   prover_state  — ProverState (Fiat-Shamir transcript)
-    //   vectors       — 原始向量 (基域)
-    //   witnesses     — commit() 返回的 Witness 列表
-    //   linear_forms  — 约束的线性形式 (每个约束是一个多线性多项式)
-    //   evaluations   — 声明的求值结果: evaluations[i*nvec+j] = linear_form[i](vector[j])
+    // prover_state  — Fiat-Shamir transcript
+    // vectors       — 原始向量（基域）
+    // witnesses     — commit() 产生的 Witness 列表
+    // linear_forms  — 约束线性形式（unique_ptr 列表）
+    // evaluations   — 声明的求值: eval[i*nvec+j] = linear_form[i](vector[j])
     //
-    // 输出: FinalClaim<Target> — 最终声明 (求值点 + RLC 系数)
-    //
-    // 实现: 见 whir_prover.hpp
+    // 返回: FinalClaim（evaluation_point + RLC 系数）
     // -------------------------------------------------------------------------
     template <typename Transcript>
     FinalClaim<Target> prove(
@@ -381,17 +342,13 @@ struct Config {
         std::span<const Target> evaluations) const;
 
     // -------------------------------------------------------------------------
-    // verify(verifier_state, commitments, evaluations)
-    //   — WHIR 完整验证 (verifier 侧, 12 步)。
+    // 完整 WHIR 验证（验证者端）。实现在 whir_verifier.hpp。
     //
-    // 输入:
-    //   verifier_state — VerifierState (含 proof 的 transcript)
-    //   commitments    — receive_commitment() 返回的 Commitment 列表
-    //   evaluations    — 声明的求值结果
+    // verifier_state — 包含已加载证明的 transcript
+    // commitments    — receive_commitment() 产生的 Commitment 列表
+    // evaluations    — 声明的求值
     //
-    // 输出: FinalClaim<Target> — 最终声明 (含 linear_form_rlc 计算结果)
-    //
-    // 实现: 见 whir_verifier.hpp
+    // 返回: FinalClaim（evaluation_point + RLC 系数 + linear_form_rlc）
     // -------------------------------------------------------------------------
     template <typename Transcript>
     FinalClaim<Target> verify(
@@ -400,9 +357,9 @@ struct Config {
         std::span<const Target> evaluations) const;
 };
 
-// =============================================================================
-// Witness / Commitment 类型别名 (对应 Rust)
-// =============================================================================
+// ============================================================================
+// 类型别名，与 Rust API 保持一致
+// ============================================================================
 
 template <typename F, typename M>
 using Witness = irs_commit::Witness<typename M::Source, F>;
@@ -410,58 +367,57 @@ using Witness = irs_commit::Witness<typename M::Source, F>;
 template <typename F>
 using Commitment = irs_commit::Commitment<F>;
 
-// =============================================================================
-// FinalClaim<F> — WHIR 验证的最终声明。
+// ============================================================================
+// FinalClaim<F> — WHIR 证明/验证的最终输出
 //
-// 证明结束后, prover 输出一个 FinalClaim, 其中:
-//   evaluation_point  — 多线性扩张的求值点 (由所有 sumcheck 轮的坐标拼接而成)
-//   rlc_coefficients   — 初始约束的随机线性组合系数
-//   linear_form_rlc    — 约束 RLC 在 evaluation_point 处的声明值
+// 字段:
+//   evaluation_point — 所有 sumcheck 轮坐标的拼接
+//   rlc_coefficients — 初始约束的随机线性组合系数
+//   linear_form_rlc  — 在 evaluation_point 处的声明 RLC 值
 //
-// verifier 可以调用 FinalClaim::verify(linear_forms) 做本地检查:
-//   用实际的线性形式重新计算 RLC 在 evaluation_point 处的值,
-//   与声明的 linear_form_rlc 比对。若一致则接受, 否则拒绝。
-//
-// 输入:
-//   linear_forms — 实际的线性形式列表 (verifier 本地持有)
-//
-// 输出: true 当且仅当 Σ rlc_coeffs[i] * linear_form[i](evaluation_point) == linear_form_rlc
-// =============================================================================
+// 验证者可本地检查:
+//   SUM_i rlc_coefficients[i] * linear_forms[i].mle_evaluate(evaluation_point)
+//     == linear_form_rlc
+// ============================================================================
 
 template <typename F>
 struct FinalClaim {
-    // 多线性扩张求值点 (所有 sumcheck 轮坐标拼接)
+    // 验证者在协议执行过程中拒绝时设为 false
+    bool valid = false;
+    std::uint32_t reject_code = 0;
+
     std::vector<F> evaluation_point;
-
-    // 约束的随机线性组合系数 (prover 和 verifier 通过 transcript 确定性地挤出)
     std::vector<F> rlc_coefficients;
-
-    // 声明的 RLC 在 evaluation_point 处的值
     F linear_form_rlc;
 
     FinalClaim() : linear_form_rlc(F::zero()) {}
 
+    static FinalClaim rejected(std::uint32_t code) {
+        FinalClaim claim;
+        claim.reject_code = code;
+        return claim;
+    }
+
     FinalClaim(std::vector<F> ep, std::vector<F> rlc, F lf_rlc)
-        : evaluation_point(std::move(ep))
+        : valid(true)
+        , evaluation_point(std::move(ep))
         , rlc_coefficients(std::move(rlc))
         , linear_form_rlc(lf_rlc) {}
 
     // -------------------------------------------------------------------------
-    // verify(linear_forms) — 本地验证 FinalClaim。
+    // 最终声明的本地验证
     //
-    // 输入: linear_forms — verifier 持有的实际线性形式 (const* 列表)
+    // 重新计算 SUM_i rlc_coefficients[i] * linear_forms[i].mle_evaluate(evaluation_point)
+    // 并检查是否等于 linear_form_rlc
     //
-    // 过程:
-    //   对每个约束 i:
-    //     rlc += rlc_coefficients[i] * linear_forms[i].mle_evaluate(evaluation_point)
-    //   比对 rlc 与声明的 linear_form_rlc
-    //
-    // 输出: true 表示接受声明, false 表示拒绝
+    // 返回: true 接受，false 拒绝
     // -------------------------------------------------------------------------
     bool verify(const std::vector<const ::whir::algebra::LinearForm<F>*>& linear_forms) const {
-        assert(rlc_coefficients.size() == linear_forms.size());
+        if (!valid) return false;
+        if (rlc_coefficients.size() != linear_forms.size()) return false;
         F rlc = F::zero();
         for (std::size_t i = 0; i < rlc_coefficients.size(); ++i) {
+            if (linear_forms[i] == nullptr) return false;
             rlc += rlc_coefficients[i] * linear_forms[i]->mle_evaluate(evaluation_point);
         }
         return rlc == linear_form_rlc;
@@ -470,6 +426,6 @@ struct FinalClaim {
 
 } // namespace whir::protocols::whir
 
-// 模板成员函数实现 (需要完整类型, 放在最后 include)
+// 模板成员函数实现（需要完整类型，在文件末尾包含）
 #include "whir_prover.hpp"
 #include "whir_verifier.hpp"

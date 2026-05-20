@@ -42,22 +42,20 @@ int main() {
     whir::hash::Blake3 b3e;
     whir::hash::Sha2 s2e;
 
-    //lambda匿名函数
     // 引擎查找函数: 根据 EngineId 返回对应的引擎引用
-    auto el = [&](whir::EngineId id) -> const whir::hash::HashEngine& { //输入一个引擎ID,用于指定需要哪种哈希，输出一个对应的哈希对象
+    auto el = [&](whir::EngineId id) -> const whir::hash::HashEngine& {
         if (id == whir::hash::ENGINE_ID_BLAKE3) return b3e;
         if (id == whir::hash::ENGINE_ID_SHA2) return s2e;
         std::abort();
     };
 
     // 测试用例: (标签, 引擎ID, 叶子数, 打开的索引列表)
-    struct Case { const char* label; //测试用例的名称标签
-                  whir::EngineId hid; //哈希引擎ID
-                  std::size_t nl;     //叶子个数
-                  std::vector<std::size_t> idx; //索引列表
-                }; 
+    struct Case { const char* label;
+                  whir::EngineId hid;
+                  std::size_t nl;
+                  std::vector<std::size_t> idx;
+                };
     const std::vector<Case> cases = {
-        //用例1:BLAKE3,16个节点,索引[3,5,11]
         {"blake3-16-2", whir::hash::ENGINE_ID_BLAKE3, 16, {3, 5, 11}},
         {"blake3-32-3", whir::hash::ENGINE_ID_BLAKE3, 32, {0, 1, 2, 31}},
         {"sha2-8-2",    whir::hash::ENGINE_ID_SHA2,    8, {2, 6}},
@@ -69,25 +67,25 @@ int main() {
 
         // 生成确定性叶子: leaf[i][j] = (i*31 + j) & 0xFF
         std::vector<Hash> leaves(c.nl);
-        for (std::size_t i = 0; i < c.nl; ++i) //外层:遍历每个叶子
-            for (std::size_t j = 0; j < 32; ++j) //内层: 填充32字节
-                leaves[i][j] = (uint8_t)((i * 31 + j) & 0xFF); //构造哈希
+        for (std::size_t i = 0; i < c.nl; ++i)
+            for (std::size_t j = 0; j < 32; ++j)
+                leaves[i][j] = (uint8_t)((i * 31 + j) & 0xFF);
 
         // 构建 Merkle 树
-        auto cfg = mt::make_config(c.hid, c.nl);     // 按叶子数+引擎生成配置
-        auto w = mt::build_tree(cfg, leaves, el);     // 自底向上构建
-        auto layers = mt::layers_for_size(c.nl);       // 树层数 = ceil(log2(nl))
-        auto leaf_layer = std::size_t{1} << layers;   // 补齐后的叶子层大小
-        auto root = mt::tree_root(w);                  // 根节点 (nodes.back())
+        auto cfg = mt::make_config(c.hid, c.nl);
+        auto w = mt::build_tree(cfg, leaves, el);
+        auto layers = mt::layers_for_size(c.nl);
+        auto leaf_layer = std::size_t{1} << layers;
+        auto root = mt::tree_root(w);
         auto hints = mt::open_path(cfg, w,
-            std::span<const std::size_t>{c.idx.data(), c.idx.size()}); // 生成打开路径 
+            std::span<const std::size_t>{c.idx.data(), c.idx.size()});
 
         std::printf("CASE %zu %s num_leaves=%zu\n", ci, c.label, c.nl);
         dump_hash("root", root);
         std::printf("  leaf_layer %zu\n  num_hints %zu\n", leaf_layer, hints.size());
         for (std::size_t i = 0; i < hints.size(); ++i) {
-            char b[16]; //1.char b[16]声明字符数组 
-            std::snprintf(b, 16, "hint%zu", i); //2.b:目标缓冲区,16:缓冲区最大大小 ,%zu是std::size_t类型的格式说明符
+            char b[16];
+            std::snprintf(b, 16, "hint%zu", i);
             dump_hash(b, hints[i]);
         }
     }

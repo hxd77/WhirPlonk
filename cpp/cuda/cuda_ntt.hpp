@@ -108,11 +108,20 @@ public:
 inline uint32_t div_up(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
 
 // ---- 内核声明 (在 cuda_ntt.cu 中实现) ----
-void launch_ntt_radix2(uint64_t* data, const uint64_t* roots, uint32_t n, uint32_t stride);
-void launch_ntt_radix4(uint64_t* data, const uint64_t* roots, uint32_t n, uint32_t stride);
-void launch_apply_twiddles(uint64_t* data, const uint64_t* roots, uint32_t rows, uint32_t cols, uint32_t step);
-void launch_transpose(uint64_t* data, uint32_t rows, uint32_t cols);
+void launch_ntt_radix2(uint64_t* data, const uint64_t* roots, uint32_t n, uint32_t stride, uint32_t batches);
+void launch_ntt_radix4(uint64_t* data, const uint64_t* roots, uint32_t n, uint32_t stride, uint32_t batches);
+void launch_apply_twiddles(uint64_t* data, const uint64_t* roots, uint32_t rows, uint32_t cols, uint32_t step, uint32_t batches);
+void launch_transpose(const uint64_t* src, uint64_t* dst, uint32_t rows, uint32_t cols, uint32_t batches);
+void launch_pack_rs_coeffs(const uint64_t* coeffs, uint64_t* out,
+                           uint32_t poly_size, uint32_t codeword_length,
+                           uint32_t interleaving_depth, uint32_t num_polys);
 void launch_encode_to_bytes(const uint64_t* values, uint8_t* out, uint32_t count);
+void launch_sha256_hash_many(const uint8_t* input, uint8_t* output,
+                             uint32_t message_size, uint32_t count);
+void launch_sha256_hash_goldilocks_rows(const uint64_t* input, uint8_t* output,
+                                        uint32_t row_elements, uint32_t count);
+void launch_gather_hashes(const uint8_t* nodes, const uint64_t* node_indices,
+                          uint8_t* out, uint32_t count);
 void launch_encode_ext3_to_bytes(const uint64_t* c0, const uint64_t* c1, const uint64_t* c2, uint8_t* out, uint32_t count);
 
 } // namespace whir::cuda

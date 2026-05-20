@@ -1,17 +1,18 @@
 #pragma once
 
-// =============================================================================
-// whir_zk_impl.hpp — ZK WHIR 协议方法实现。
-// 对应 WHIR 中的 src/protocols/whir_zk/committer.rs + prover.rs + verifier.rs。
+// ============================================================================
+// whir_zk_impl.hpp — ZK WHIR 协议方法实现
 //
 // 定义 ZkConfig 的四个模板方法:
 //   commit()              — ZK 盲化承诺
 //   receive_commitments() — 接收 ZK 承诺
-//   prove()               — ZK WHIR 证明 (11 步)
-//   verify()              — ZK WHIR 验证 (9 步)
+//   prove()               — ZK WHIR 证明（11 步）
+//   verify()              — ZK WHIR 验证（9 步）
 //
-// 此文件由 whir_zk.hpp 在末尾 include。
-// =============================================================================
+// 由 whir_zk.hpp 在文件末尾包含。
+//
+// 对应 Rust 文件: src/protocols/whir_zk/{committer.rs, prover.rs, verifier.rs}
+// ============================================================================
 
 #include "../geometric_challenge.hpp"
 #include "../../transcript/transcript.hpp"
@@ -22,25 +23,21 @@
 
 namespace whir::protocols::whir_zk {
 
-// =============================================================================
-// ZkConfig::commit() — 用零知识盲化承诺多个多项式。
+// ============================================================================
+// ZkConfig::commit() — 多项式的 ZK 盲化承诺
 //
-// 输入:
-//   prover_state — ProverState (Fiat-Shamir transcript)
-//   polynomials  — 原始多项式列表 (num_polys 个, 每个长度 = 2^num_witness_vars)
-//   rng          — 随机数生成器 (用于采样盲化多项式)
+// prover_state — Fiat-Shamir transcript
+// polynomials  — 原始多项式 (num_polys x 2^num_witness_vars)
+// rng          — 用于采样盲化多项式的 RNG
 //
-// 过程:
-//   对每个多项式 pi:
-//     1. 采样盲化多项式 BlindingPolynomials (m_poly, g_hats)
-//     2. 构造 f_hat = f + mask (mask = m_poly, 周期性)
-//     3. 对 f_hat 做 blinded_commitment (IRS → Merkle → OOD)
-//   收集所有盲化向量:
-//     4. layout_vectors() 展平盲化多项式 → blind_vectors
-//     5. 对 blind_vectors 做 blinding_commitment (IRC → Merkle → OOD)
+// 对每个多项式:
+//   1. 采样 BlindingPolynomials (m_poly, g_hats)
+//   2. 构造 f_hat = f + mask（mask 以 m_poly.size() 为周期）
+//   3. 通过 blinded_commitment 对 f_hat 做 WHIR 承诺
+// 然后布局所有盲化向量，通过 blinding_commitment 做 WHIR 承诺
 //
-// 输出: ZkWitness (f_hat_vectors + f_hat_witnesses + blinding_polynomials + blinding_witness)
-// =============================================================================
+// 返回 ZkWitness
+// ============================================================================
 
 template <typename F>
 template <typename Transcript, typename Rng>
@@ -58,16 +55,16 @@ ZkWitness<F> ZkConfig<F>::commit(
     std::vector<BlindingPolynomials<F>> blind_polys(num_polys);
 
     for (std::size_t pi = 0; pi < num_polys; ++pi) {
-        // 1. 采样盲化多项式: m_poly (交错的 g0_hat + msk), g_hats (每个见证变量一个)
+        // 采样盲化: m_poly（交织的 g0_hat + msk），g_hats（每个 witness 变量一个）
         auto bp = BlindingPolynomials<F>::sample(rng, num_blind_vars, num_wit_vars);
         const auto& mask = bp.m_poly;
 
-        // 2. f_hat = f + mask (mask 周期为 m_poly.size())
+        // f_hat = f + mask（mask 周期性应用）
         std::vector<F> f_hat(polynomials[pi].begin(), polynomials[pi].end());
         for (std::size_t i = 0; i < f_hat.size(); ++i)
             f_hat[i] = f_hat[i] + mask[i % mask.size()];
 
-        // 3. 对 f_hat 做 WHIR 承诺
+        // WHIR 承诺 f_hat
         std::vector<std::span<const F>> single_vec = {f_hat};
         auto witness = blinded_commitment.commit(prover_state, single_vec);
 
@@ -76,7 +73,7 @@ ZkWitness<F> ZkConfig<F>::commit(
         blind_polys[pi] = std::move(bp);
     }
 
-    // 4. 收集盲化向量: layout_vectors() → [M, g_hat_1^emb, ..., g_hat_mu^emb]
+    // 布局盲化向量: [M, g_hat_0^emb, ..., g_hat_{mu-1}^emb]
     std::vector<std::vector<F>> blind_vectors;
     for (const auto& bp : blind_polys) {
         auto layout = bp.layout_vectors();
@@ -89,7 +86,7 @@ ZkWitness<F> ZkConfig<F>::commit(
     blind_refs.reserve(blind_vectors.size());
     for (const auto& v : blind_vectors) blind_refs.push_back(v);
 
-    // 5. 对盲化向量做 WHIR 承诺
+    // WHIR 承诺盲化向量
     auto blind_witness = blinding_commitment.commit(prover_state, blind_refs);
 
     return ZkWitness<F>{
@@ -97,19 +94,15 @@ ZkWitness<F> ZkConfig<F>::commit(
         std::move(blind_polys), std::move(blind_vectors), std::move(blind_witness)};
 }
 
-// =============================================================================
-// ZkConfig::receive_commitments() — 接收 ZK 承诺 (verifier 侧)。
+// ============================================================================
+// ZkConfig::receive_commitments() — 接收 ZK 承诺（验证者端）
 //
-// 输入:
-//   verifier_state — VerifierState
-//   num_polys      — 多项式数量
+// verifier_state — transcript
+// num_polys      — 多项式数量
 //
-// 过程:
-//   1. 接收 num_polys 个 f_hat 的 WHIR 承诺 (每个一个 Merkle root)
-//   2. 接收 1 个 blinding 的 WHIR 承诺
-//
-// 输出: ZkCommitment (f_hat 承诺列表 + blinding 承诺)
-// =============================================================================
+// 接收 num_polys 个 f_hat WHIR 承诺 + 1 个 blinding WHIR 承诺
+// 返回 ZkCommitment
+// ============================================================================
 
 template <typename F>
 template <typename Transcript>
@@ -124,32 +117,31 @@ ZkCommitment<F> ZkConfig<F>::receive_commitments(
     return {std::move(f_hat), std::move(blind)};
 }
 
-// =============================================================================
-// ZkConfig::prove() — ZK WHIR 完整证明 (11 步)。
+// ============================================================================
+// ZkConfig::prove() — ZK WHIR 完整证明（11 步）
 //
-// 输入:
-//   prover_state — ProverState
-//   vectors_flat — 原始多项式系数 (展平)
-//   witness      — commit() 返回的 ZkWitness
-//   linear_forms — 约束的线性形式列表
-//   evaluations  — 声明的求值结果
-//   rng          — 随机数生成器
+// prover_state — Fiat-Shamir transcript
+// vectors_flat — 原始多项式系数（展平）
+// witness      — commit() 产生的 ZkWitness
+// linear_forms — 约束线性形式
+// evaluations  — 声明的求值
+// rng          — RNG
 //
-// 输出: ::whir::protocols::whir::FinalClaim<F> (求值点 + RLC 系数)
+// 返回 whir::FinalClaim<F>（evaluation_point + RLC 系数）
 //
-// 11 步流程:
-//   1. blinding_challenge — transcript 挤出盲化挑战 β
-//   2. 折叠权重到盲化周期, 计算 M(gamma, -rho) 评价值, 发送 w_folded_blinding_evals
-//   3. masking_challenge — transcript 挤出非零掩码挑战 rho
-//   4. 构造 modified_evaluations = 原始评估 + M_eval (掩盖原始值)
-//   5. 打开 f_hat 初始 in-domain (域内挑战 + Merkle 路径)
-//   6. transcript 挤出 tau1, tau2 (STIR 合并参数)
-//   7. 展开 h_gammas = all_gammas(in_domain_points), 在 gamma 块上求值
-//   8. 逐 gamma 发送 (m_eval, g_hat_evals), 累积 m_claims 和 g_hat_claims
-//   9. 合并声明: combine_claim + build_combined_and_subproof_claims
-//  10. 内部 witness-side WHIR 证明 (对 f_hat + modified_evaluations)
-//  11. 内部 blinding-side WHIR 证明 (对 beq_weights + w_folded_weights)
-// =============================================================================
+// 步骤:
+//   1. blinding_challenge（beta，从 transcript 获取）
+//   2. 折叠权重到 mask 周期，计算 M(gamma, -rho) 求值，发送
+//   3. masking_challenge（rho，必须非零）
+//   4. modified_evaluations = original_eval + M_eval（零知识掩盖）
+//   5. 开启 f_hat 初始域内
+//   6. 挤压 tau1, tau2（STIR 合并参数）
+//   7. 展开 h_gammas = all_gammas(in_domain_points)，在 gamma 块上求值
+//   8. 逐 gamma: 发送 (m_eval, g_hat_evals)，累积 m_claims 和 g_hat_claims
+//   9. 合并声明: combined_claim + build_combined_and_subproof_claims
+//  10. 内部 witness 侧 WHIR 证明（f_hat + modified_evaluations）
+//  11. 内部 blinding 侧 WHIR 证明（beq_weights + w_folded_weights）
+// ============================================================================
 
 template <typename F>
 template <typename Transcript, typename Rng>
@@ -177,19 +169,19 @@ template <typename Transcript, typename Rng>
     Embedding identity;
 
     // ---- 步骤 1: blinding_challenge ----
-    // β — 用于后续 gamma-block 求值中组合 g_hat 的盲化系数
+    // beta: 用于在 gamma 块求值中组合 g_hat 求值
     F blinding_challenge = prover_state.template verifier_message<F>();
 
-    // ---- 步骤 2: 折叠权重并计算 M(gamma, -rho) 评价值 ----
-    // 对每个线性形式 weight:
+    // ---- 步骤 2: 折叠权重并计算 M(gamma, -rho) 求值 ----
+    // 对每个线性形式权重:
     //   w_folded = fold_weight_to_mask_size(weight, num_wit_vars, num_blind_vars)
     //   对每个多项式 pi 和变量 v:
-    //     m_eval = ⟨w_folded, blinding_vector[pi][v=0]⟩
-    //     w_folded_blinding_evals 收集所有 m_eval 值
+    //     m_eval = <w_folded, blinding_vector[pi][v=0]>
     //
-    // 输出: w_folded_weights (用于后续 blinding-side WHIR)
-    //       m_evals           (用于掩盖原始评估值)
-    //       w_folded_blinding_evals (发送给 verifier)
+    // 输出:
+    //   w_folded_weights           — 用于 blinding 侧 WHIR
+    //   m_evals                    — 用于掩盖原始求值
+    //   w_folded_blinding_evals    — 发送给验证者
     std::vector<::whir::algebra::Covector<F>> w_folded_weights;
     std::vector<F> m_evals;
     std::vector<F> w_folded_blinding_evals;
@@ -199,7 +191,6 @@ template <typename Transcript, typename Rng>
     w_folded_blinding_evals.reserve(linear_forms.size() * num_polys * num_wit_plus_1);
 
     for (const auto& weight : linear_forms) {
-        // 折叠权重到盲化周期 P = 2^(ell+1)
         auto folded_vec = fold_weight_to_mask_size<F>(*weight, num_wit_vars, num_blind_vars);
         auto w_folded = ::whir::algebra::Covector<F>(std::move(folded_vec));
 
@@ -208,7 +199,7 @@ template <typename Transcript, typename Rng>
             for (std::size_t v = 0; v < num_wit_plus_1; ++v) {
                 F eval = w_folded.evaluate(identity, blinding_vectors[base + v]);
                 w_folded_blinding_evals.push_back(eval);
-                if (v == 0) m_evals.push_back(eval); // M(gamma, -rho) = 第 0 个分量
+                if (v == 0) m_evals.push_back(eval); // M(gamma, -rho) = 分量 0
             }
         }
         w_folded_weights.push_back(std::move(w_folded));
@@ -219,46 +210,40 @@ template <typename Transcript, typename Rng>
         prover_state.prover_message(eval);
 
     // ---- 步骤 3: masking_challenge (rho) ----
-    // rho ≠ 0 保证盲化非平凡
+    // rho != 0 确保非平凡掩盖
     F masking_challenge = prover_state.template verifier_message<F>();
     assert(masking_challenge != F::zero());
 
     // ---- 步骤 4: 构造 modified_evaluations ----
-    // modified_eval[i] = eval[i] + m_eval[i]
-    // 用 m_eval 掩盖原始评估值, 实现零知识
+    // modified_eval[i] = eval[i] + m_eval[i]（零知识掩盖）
     std::vector<F> modified_evaluations(evaluations.size());
     for (std::size_t i = 0; i < evaluations.size(); ++i)
         modified_evaluations[i] = evaluations[i] + m_evals[i];
 
-    // ---- 步骤 5: 打开 f_hat 初始 in-domain ----
-    // verifier 需要验证 f_hat 的编码矩阵中某些行的值
+    // ---- 步骤 5: 开启 f_hat 初始域内 ----
     std::vector<const ::whir::protocols::irs_commit::Witness<F, F>*> witness_ptrs;
     witness_ptrs.reserve(f_hat_witnesses.size());
     for (const auto& w : f_hat_witnesses) witness_ptrs.push_back(&w);
 
     auto initial_in_domain = blinded_commitment.initial_committer.open(prover_state, witness_ptrs);
-    // initial_in_domain.points = 域内挑战点
-    // initial_in_domain.matrix = 被挑战的子矩阵
 
     // ---- 步骤 6: tau1, tau2 ----
-    // tau1 — 用于合并 (m_claim, g_hat_claims) 的随机标量
-    // tau2 — 用于批量化 gamma 求值的随机标量
+    // tau1: 合并 (m_claim, g_hat_claims) 的随机标量
+    // tau2: 批量处理 gamma 求值的随机标量
     F tau1 = prover_state.template verifier_message<F>();
     F tau2 = prover_state.template verifier_message<F>();
 
-    // ---- 步骤 7: h_gammas + gamma-block 求值 ----
-    // 对每个域内挑战点, 展开其 coset 得到 gamma 点列表
+    // ---- 步骤 7: h_gammas + gamma 块求值 ----
+    // 将每个域内挑战点展开为其陪集 gamma 点
     auto h_gammas = all_gammas(initial_in_domain.points);
     std::size_t num_gammas = h_gammas.size();
 
-    // 在所有 gamma 点求值盲化多项式, 累积 beq 权重
+    // 在所有 gamma 点上求值盲化多项式，累积 beq 权重
     auto [eval_results, beq_weight_accum] = evaluate_gamma_block<F>(
         blinding_polys, h_gammas, masking_challenge, blinding_challenge, tau2,
         num_blind_vars, num_wit_vars);
-    // eval_results 布局: [m_eval, g_hat_0, ..., g_hat_{mu-1}, h_val] × num_polys per gamma
-    // beq_weight_accum: 全尺寸 beq 权重累积 (用于 blinding-side WHIR)
 
-    // ---- 步骤 8: 发送 per-gamma 值并累积声明 ----
+    // ---- 步骤 8: 发送逐 gamma 值，累积声明 ----
     std::size_t stride_per_poly = num_wit_vars + 2;
     std::size_t stride_per_gamma = num_polys * stride_per_poly;
 
@@ -277,7 +262,7 @@ template <typename Transcript, typename Rng>
                 for (std::size_t j = 0; j < num_wit_vars; ++j)
                     prover_state.prover_message(off[1 + j]);
 
-                // 累积: 每个声明是 tau2^gi 加权的和
+                // 累积: 每个声明按 tau2^gi 加权
                 m_claims[pi] += tau2_pow * m_eval;
                 for (std::size_t j = 0; j < num_wit_vars; ++j)
                     g_hat_claims[pi * num_wit_vars + j] += tau2_pow * off[1 + j];
@@ -288,8 +273,8 @@ template <typename Transcript, typename Rng>
     }
 
     // ---- 步骤 9: 合并声明 ----
-    // combined_claims[i] = m_claims[i] + 2*tau1 * Σ tau1^j * g_hat_claims[i][j]
-    // subproof_claims: 展平的 [m_claims, g_hat_claims] (供 blinding-side WHIR 使用)
+    // combined_claims[i] = m_claims[i] + 2*tau1 * SUM_j tau1^j * g_hat_claims[i][j]
+    // subproof_claims: 展平的 [m_claims, g_hat_claims...] 用于 blinding 侧 WHIR
     std::vector<std::span<const F>> g_hat_slices(num_polys);
     for (std::size_t i = 0; i < num_polys; ++i)
         g_hat_slices[i] = std::span{g_hat_claims}.subspan(i * num_wit_vars, num_wit_vars);
@@ -300,8 +285,8 @@ template <typename Transcript, typename Rng>
     for (const auto& c : combined_claims) prover_state.prover_message(c);
     for (const auto& c : batched_h_claims) prover_state.prover_message(c);
 
-    // ---- 步骤 10: 内部 witness-side WHIR 证明 ----
-    // 对 f_hat 向量 + modified_evaluations 运行标准 WHIR prove
+    // ---- 步骤 10: 内部 witness 侧 WHIR 证明 ----
+    // 对 f_hat 向量 + modified_evaluations 运行标准 WHIR 证明
     std::vector<std::span<const F>> f_hat_spans;
     f_hat_spans.reserve(f_hat_vectors.size());
     for (const auto& v : f_hat_vectors) f_hat_spans.push_back(v);
@@ -315,8 +300,7 @@ template <typename Transcript, typename Rng>
         std::span<const ::whir::protocols::irs_commit::Witness<F, F>>{whir_witnesses},
         std::move(linear_forms), modified_evaluations);
 
-    // ---- 步骤 11: 内部 blinding-side WHIR 证明 ----
-    // 对盲化向量 + (beq_weights, w_folded_weights) 运行 WHIR prove
+    // ---- 步骤 11: 内部 blinding 侧 WHIR 证明 ----
     // blinding_forms = [beq_weights, w_folded_weights[0], ..., w_folded_weights[n-1]]
     // all_blinding_claims = [batched_blind_subproof_claims, w_folded_blinding_evals]
 
@@ -347,28 +331,28 @@ template <typename Transcript, typename Rng>
     return result;
 }
 
-// =============================================================================
-// ZkConfig::verify() — ZK WHIR 完整验证 (9 步)。
+// ============================================================================
+// ZkConfig::verify() — ZK WHIR 完整验证（9 步）
 //
-// 输入:
-//   verifier_state — VerifierState
-//   weights        — 线性形式列表 (const*)
-//   evaluations    — 声明的求值结果
-//   commitment     — receive_commitments() 返回的 ZkCommitment
+// verifier_state — Fiat-Shamir transcript
+// weights        — 线性形式指针
+// evaluations    — 声明的求值
+// commitment     — receive_commitments() 产生的 ZkCommitment
 //
-// 输出: true 表示接受证明, false 表示拒绝
+// 返回 true 接受，false 拒绝
 //
-// 9 步流程:
-//   1. blinding_challenge (与 prover 确定性一致)
-//   2. 读取 w_folded_blinding_evals, 提取 m_evals
-//   3. masking_challenge (rho ≠ 0)
-//   4. 验证 f_hat 初始 in-domain (Merkle 路径验证)
+// 步骤:
+//   1. blinding_challenge（确定性，与证明者一致）
+//   2. 读取 w_folded_blinding_evals，提取 m_evals
+//   3. masking_challenge（rho，必须非零）
+//   4. 验证 f_hat 初始域内（Merkle 路径验证）
 //   5. tau1, tau2 + h_gammas 展开
-//   6. 读取 per-gamma 值, 累积 m_claims, g_hat_claims, 计算 expected_batched_h_claims
-//   7. 读取合并声明, 与本地计算的期望值比对
-//   8. 验证 witness-side WHIR (对 f_hat + modified_evaluations)
-//   9. 验证 blinding-side WHIR (对 beq_weights + w_folded_weights)
-// =============================================================================
+//   6. 读取逐 gamma 值，累积 m_claims/g_hat_claims，
+//      本地计算 expected_batched_h_claims
+//   7. 读取合并声明，与本地计算的期望值比较
+//   8. 验证 witness 侧 WHIR（f_hat + modified_evaluations）
+//   9. 验证 blinding 侧 WHIR（beq_weights + w_folded_weights）
+// ============================================================================
 
 template <typename F>
 template <typename Transcript>
@@ -383,40 +367,41 @@ bool ZkConfig<F>::verify(
     std::size_t num_blind_vars = num_blinding_variables();
     std::size_t num_wit_plus_1 = num_wit_vars + 1;
 
-    // ---- 步骤 1: blinding_challenge (确定性与 prover 一致) ----
+    // ---- 步骤 1: blinding_challenge（与证明者确定性一致） ----
     F blinding_challenge = verifier_state.template verifier_message<F>();
 
-    // ---- 步骤 2: 读取 w_folded_blinding_evals, 提取 m_evals ----
-    // 布局: 每个 weight × 每个 poly × (num_wit_vars+1) 个 F
+    // ---- 步骤 2: 读取 w_folded_blinding_evals，提取 m_evals ----
+    // 布局: 每个权重 x 每个多项式 x (num_wit_vars+1) 个域元素
     std::size_t num_w_folded = weights.size() * num_polys * num_wit_plus_1;
     std::vector<F> w_folded_blinding_evals(num_w_folded);
     for (auto& val : w_folded_blinding_evals)
         if (!verifier_state.prover_message(val)) return false;
 
-    // 提取 m_evals (每 (num_wit_vars+1) 个的第一个)
+    // 提取 m_evals（每组 num_wit_plus_1 的第一个元素）
     std::vector<F> m_evals;
     for (std::size_t i = 0; i < w_folded_blinding_evals.size(); i += num_wit_plus_1)
         m_evals.push_back(w_folded_blinding_evals[i]);
 
-    // ---- 步骤 3: masking_challenge (必须非零) ----
+    // ---- 步骤 3: masking_challenge（必须非零） ----
     F masking_challenge = verifier_state.template verifier_message<F>();
     if (masking_challenge == F::zero()) return false;
 
-    // ---- 步骤 4: 验证 f_hat 初始 in-domain ----
-    // 接收子矩阵 + Merkle 路径, 重建 root 与承诺比对
+    // ---- 步骤 4: 验证 f_hat 初始域内 ----
     std::vector<const ::whir::protocols::irs_commit::Commitment<F>*> cptrs;
     cptrs.reserve(commitment.f_hat.size());
     for (const auto& c : commitment.f_hat) cptrs.push_back(&c);
 
     auto initial_in_domain = blinded_commitment.initial_committer.verify(verifier_state, cptrs);
+    if (initial_in_domain.points.empty() &&
+        blinded_commitment.initial_committer.in_domain_samples != 0) return false;
 
     // ---- 步骤 5: tau1, tau2 + h_gammas ----
     auto h_gammas = all_gammas(initial_in_domain.points);
     F tau1 = verifier_state.template verifier_message<F>();
     F tau2 = verifier_state.template verifier_message<F>();
 
-    // ---- 步骤 6: 读取 per-gamma 值并累积声明 ----
-    // verifier 本地计算 expected_batched_h_claims 用于后续比对
+    // ---- 步骤 6: 读取逐 gamma 值，累积声明 ----
+    // 验证者本地计算 expected_batched_h_claims 用于后续比较
     std::vector<F> m_claims(num_polys, F::zero());
     std::vector<std::vector<F>> g_hat_claims_per_poly(num_polys,
         std::vector<F>(num_wit_vars, F::zero()));
@@ -425,11 +410,10 @@ bool ZkConfig<F>::verify(
     F tau2_power = F::one();
     for (const auto& gamma : h_gammas) {
         for (std::size_t pi = 0; pi < num_polys; ++pi) {
-            // 读取 m_eval
             F m_eval;
             if (!verifier_state.prover_message(m_eval)) return false;
 
-            // 本地重建 h_value = m_eval + Σ β^j * gamma^(2^(j-1)) * g_hat_eval_j
+            // 重构 h_value = m_eval + SUM_j beta^j * gamma^(2^(j-1)) * g_hat_eval_j
             F h_value = m_eval;
             F blind_pow = blinding_challenge;
             F gamma_pow = gamma;
@@ -449,7 +433,6 @@ bool ZkConfig<F>::verify(
     }
 
     // ---- 步骤 7: 读取合并声明并验证 ----
-    // 比对 prover 发送的 batched_h_claims 与本地计算的期望值
     std::vector<F> combined_claims(num_polys);
     for (auto& c : combined_claims)
         if (!verifier_state.prover_message(c)) return false;
@@ -457,6 +440,7 @@ bool ZkConfig<F>::verify(
     for (auto& c : batched_h_claims)
         if (!verifier_state.prover_message(c)) return false;
 
+    // 比较证明者发送的 batched_h_claims 与本地计算的期望值
     if (batched_h_claims != expected_batched_h_claims) return false;
 
     // 验证 combined_claims
@@ -469,22 +453,24 @@ bool ZkConfig<F>::verify(
 
     if (combined_claims != expected_combined) return false;
 
-    // ---- 步骤 8: 验证 witness-side WHIR ----
-    // 用 modified_evaluations = eval + m_eval 验证 WHIR
+    // ---- 步骤 8: 验证 witness 侧 WHIR ----
+    // modified_evaluations = eval + m_eval（零知识掩盖）
     std::vector<F> modified_evaluations(evaluations.size());
     for (std::size_t i = 0; i < evaluations.size(); ++i)
         modified_evaluations[i] = evaluations[i] + m_evals[i % m_evals.size()];
 
     auto fc = blinded_commitment.verify(verifier_state, cptrs, modified_evaluations);
+    if (!fc.verify(std::vector<const ::whir::algebra::LinearForm<F>*>{weights.begin(), weights.end()}))
+        return false;
 
-    // ---- 步骤 9: 验证 blinding-side WHIR ----
-    // 本地构造 beq 权重 + w_folded 权重, 与 prover 发送的声明比对
+    // ---- 步骤 9: 验证 blinding 侧 WHIR ----
+    // 本地构造 beq 权重 + w_folded 权重，与证明者的声明验证
 
-    // 构造 beq_cv: 从 gammas 批量构造 beq 权重
+    // 从 gamma 批量构造 beq_cv
     auto beq_cv = construct_batched_eq_weights_from_gammas<F>(
         h_gammas, masking_challenge, tau2, num_blind_vars);
 
-    // 折叠每个 linear form 到盲化周期
+    // 将每个线性形式折叠到 mask 周期
     std::vector<::whir::algebra::Covector<F>> w_folded_cvs;
     w_folded_cvs.reserve(weights.size());
     for (const auto* w : weights) {
@@ -513,8 +499,7 @@ bool ZkConfig<F>::verify(
     blind_lf_ptrs.reserve(blinding_forms.size());
     for (const auto& bf : blinding_forms) blind_lf_ptrs.push_back(bf.get());
 
-    (void)fc; (void)blind_fc;
-    return true;
+    return blind_fc.verify(blind_lf_ptrs);
 }
 
 } // namespace whir::protocols::whir_zk

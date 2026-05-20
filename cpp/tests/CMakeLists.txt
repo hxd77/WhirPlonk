@@ -42,8 +42,14 @@ target_link_libraries(dump_sumcheck PRIVATE whir_algebra)
 add_executable(dump_transcript dump_transcript.cpp)
 target_link_libraries(dump_transcript PRIVATE whir_algebra)
 
+add_executable(dump_rng dump_rng.cpp)
+target_link_libraries(dump_rng PRIVATE whir_algebra)
+
 add_executable(dump_whir dump_whir.cpp)
 target_link_libraries(dump_whir PRIVATE whir_algebra)
+
+add_executable(dump_whir_zk dump_whir_zk.cpp)
+target_link_libraries(dump_whir_zk PRIVATE whir_algebra)
 
 # ============================================================
 # demo_irs_commit — IRS 承诺协议分步演示 (教学用途)
@@ -76,4 +82,45 @@ include(GoogleTest)
 # ============================================================
 add_executable(test_protocols test_protocols.cpp)
 target_link_libraries(test_protocols PRIVATE whir_algebra GTest::gtest_main)
+if(WHIR_CUDA)
+    target_link_libraries(test_protocols PRIVATE whir_cuda)
+endif()
 gtest_discover_tests(test_protocols)
+
+if(WHIR_CUDA)
+    add_executable(test_cuda_ntt test_cuda_ntt.cpp)
+    target_link_libraries(test_cuda_ntt PRIVATE whir_algebra whir_cuda GTest::gtest_main)
+    gtest_discover_tests(test_cuda_ntt)
+
+    add_executable(test_cuda_rs_encode test_cuda_rs_encode.cpp)
+    target_link_libraries(test_cuda_rs_encode PRIVATE whir_algebra whir_cuda GTest::gtest_main)
+    gtest_discover_tests(test_cuda_rs_encode)
+
+    add_executable(test_cuda_rs_encode_bytes test_cuda_rs_encode_bytes.cpp)
+    target_link_libraries(test_cuda_rs_encode_bytes PRIVATE whir_algebra whir_cuda GTest::gtest_main)
+    gtest_discover_tests(test_cuda_rs_encode_bytes)
+
+    add_executable(test_cuda_rs_leaf_hash test_cuda_rs_leaf_hash.cpp)
+    target_link_libraries(test_cuda_rs_leaf_hash PRIVATE whir_algebra whir_cuda GTest::gtest_main)
+    gtest_discover_tests(test_cuda_rs_leaf_hash)
+
+    add_executable(test_cuda_rs_sha256_leaves test_cuda_rs_sha256_leaves.cpp)
+    target_link_libraries(test_cuda_rs_sha256_leaves PRIVATE whir_algebra whir_cuda GTest::gtest_main)
+    gtest_discover_tests(test_cuda_rs_sha256_leaves)
+
+    add_executable(test_cuda_merkle_sha256 test_cuda_merkle_sha256.cpp)
+    target_link_libraries(test_cuda_merkle_sha256 PRIVATE whir_algebra whir_cuda GTest::gtest_main)
+    gtest_discover_tests(test_cuda_merkle_sha256)
+
+    add_executable(test_cuda_merkle_path test_cuda_merkle_path.cpp)
+    target_link_libraries(test_cuda_merkle_path PRIVATE whir_algebra whir_cuda GTest::gtest_main)
+    gtest_discover_tests(test_cuda_merkle_path)
+
+    add_executable(test_cuda_irs_commit test_cuda_irs_commit.cpp)
+    target_link_libraries(test_cuda_irs_commit PRIVATE whir_algebra whir_cuda GTest::gtest_main)
+    gtest_discover_tests(test_cuda_irs_commit)
+
+    add_executable(test_cuda_rs_sha256_merkle test_cuda_rs_sha256_merkle.cpp)
+    target_link_libraries(test_cuda_rs_sha256_merkle PRIVATE whir_algebra whir_cuda GTest::gtest_main)
+    gtest_discover_tests(test_cuda_rs_sha256_merkle)
+endif()

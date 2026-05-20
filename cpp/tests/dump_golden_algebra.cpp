@@ -1,8 +1,18 @@
-// 生成 Goldilocks / Ext2 / Ext3 的 golden vectors，用于和 Rust 原版对拍。
-// 必须和 examples/dump_golden_algebra.rs 产生逐字节相同的输出。
+// ===========================================================================
+// dump_golden_algebra.cpp — 综合代数 golden test (对拍基准)。
 //
-// 构建：见 cpp/CMakeLists.txt 里新增的 dump_golden_algebra 目标
-// 运行：./dump_golden_algebra > golden_cpp.txt
+// 运行: ./dump_golden_algebra > golden_cpp.txt
+// 对拍: diff golden_rs.txt golden_cpp.txt
+//
+// 覆盖全部代数模块, 共 14 个 SECTION:
+//   base / ext2 / ext3 — 域运算
+//   utilities / multilinear / sumcheck / ntt / wavelet / transpose
+//   linear_form / utils / hash / merkle_tree / pow / matrix_commit
+//   challenge_indices
+//
+// 每个 SECTION 使用独立 LCG 种子, 与 Rust 端逐字节一致。
+// 对应 Rust: examples/dump_golden_algebra.rs
+// ===========================================================================
 
 #include "whir/algebra/goldilocks.hpp"
 #include "whir/algebra/goldilocks_ext2.hpp"
@@ -38,7 +48,7 @@ using whir::algebra::Goldilocks;
 using whir::algebra::GoldilocksExt2;
 using whir::algebra::GoldilocksExt3;
 
-// 必须和 Rust 侧 Lcg 完全一致的 LCG
+// LCG — 与 Rust 侧完全一致的伪随机数生成器
 struct Lcg {
     uint64_t s;
     explicit Lcg(uint64_t seed) : s(seed) {}
@@ -53,7 +63,7 @@ static void print_base(const char* label, Goldilocks a) {
 }
 
 static void print_ext2(const char* label, GoldilocksExt2 a) {
-    std::printf("%s %llu %llu\n", label, //llu表示long long unsigned
+    std::printf("%s %llu %llu\n", label,
         (unsigned long long)a.c0().as_canonical_u64(),
         (unsigned long long)a.c1().as_canonical_u64());
 }
@@ -137,11 +147,10 @@ int main() {
     // ====================================================================
     // 以下各 section 用独立 seed, 与 Rust 端字节级对齐。
     // ====================================================================
-    //打印域元素向量
-    auto dump_base_vec = [](const char* label, const std::vector<Goldilocks>& v) { //[]是C++的lambda捕获列表,表示不捕获任何外部变量,只能使用自己的参数
+    auto dump_base_vec = [](const char* label, const std::vector<Goldilocks>& v) {
         std::printf("  %s %zu\n", label, v.size());
         for (const auto& x : v) {
-            std::printf("     %llu\n", (unsigned long long)x.as_canonical_u64()); //把Goldilocks元素还原为标准uint64_t
+            std::printf("     %llu\n", (unsigned long long)x.as_canonical_u64());
         }
     };
 
@@ -302,7 +311,7 @@ int main() {
     {
         Lcg rng(0x6666666666666666ULL);
 
-        // CASE 0: 8x4 矩阵转置 (这里直接用 u64 元素, 与 Rust 端一致)
+        // CASE 0: 8x4 矩阵转置 (u64 元素, 与 Rust 端一致)
         const std::size_t rows = 8, cols = 4;
         std::vector<uint64_t> m;
         for (std::size_t i = 0; i < rows * cols; ++i) m.push_back(rng.next());
@@ -416,7 +425,7 @@ int main() {
             std::printf("\n");
         };
 
-        // 与 Rust 端字节级一致的 LCG 取字节: 每次取 u64 转 little-endian 8 字节, 拼到 v 满 n 个为止。
+        // LCG 取字节: 每次取 u64 转 LE 8 字节, 拼到 v 满 n 个为止
         auto make_bytes = [&](std::size_t n) {
             std::vector<std::uint8_t> v;
             v.reserve(n);
@@ -464,7 +473,6 @@ int main() {
         run(12, sha2_eng,  "sha2",   100,  2);
     }
 
-    // 与 Rust dumper 共用的 dump_hash: 一行 "  label <64 hex chars>"。
     auto dump_hash = [](const char* label, const whir::hash::Hash& h) {
         std::printf("  %s ", label);
         for (auto byte : h) std::printf("%02x", static_cast<unsigned>(byte));
@@ -500,7 +508,7 @@ int main() {
         for (std::size_t case_idx = 0; case_idx < cases.size(); ++case_idx) {
             const auto& c = cases[case_idx];
 
-            //生成 deterministic leaves: 第 i 个叶子第 j 字节 = (i*31 + j) & 0xFF, 与 Rust 端一致。
+            // 生成确定性叶子: leaf[i][j] = (i*31 + j) & 0xFF
             std::vector<Hash> leaves(c.num_leaves);
             for (std::size_t i = 0; i < c.num_leaves; ++i) {
                 for (std::size_t j = 0; j < 32; ++j) {
@@ -552,7 +560,7 @@ int main() {
             std::array<std::uint8_t, 32> challenge{};
             challenge.fill(c.challenge_byte);
 
-            //同 Rust dumper: 单线程顺序扫描, 找最小满足 nonce, 与并行版本结果一致。
+            // 单线程顺序扫描, 找最小满足 nonce, 与并行版本结果一致
             const std::size_t batch = std::max<std::size_t>(c.engine->preferred_batch_size(), 1);
             std::vector<std::uint8_t> inputs(64 * batch, 0);
             std::vector<Hash> outputs(batch);
@@ -586,7 +594,7 @@ int main() {
                 }
             }
 
-            //再哈希一次得到正式输出哈希 (用于对拍)
+            // 再哈希一次得到正式输出哈希 (用于对拍)
             std::array<std::uint8_t, 64> single{};
             std::memcpy(single.data(), challenge.data(), 32);
             for (int b = 0; b < 8; ++b) {
@@ -604,7 +612,7 @@ int main() {
         }
     }
 
-    //matrix_commit: 编码 + 行哈希。与 Rust ArkFieldEncoder + hash_many 字节级一致。
+    // matrix_commit: 编码 + 行哈希, 与 Rust ArkFieldEncoder + hash_many 字节级一致
     std::printf("# SECTION matrix_commit\n");
     {
         namespace mc = whir::protocols::matrix_commit;
@@ -630,7 +638,7 @@ int main() {
             }
         };
 
-        //CASE 0: Goldilocks, Blake3, 4 × 8 (msg = 64)
+        // CASE 0: Goldilocks, Blake3, 4 × 8 (msg = 64)
         {
             const std::size_t num_rows = 4, num_cols = 8;
             const std::size_t total = num_rows * num_cols;
@@ -647,13 +655,13 @@ int main() {
             run_leaves(0, "field64-blake3", blake3_eng, leaves, num_rows, num_cols, msg_size);
         }
 
-        //CASE 1: GoldilocksExt2, Blake3, 2 × 8 (msg = 128)
+        // CASE 1: GoldilocksExt2, Blake3, 2 × 8 (msg = 128)
         {
             const std::size_t num_rows = 2, num_cols = 8;
             const std::size_t total = num_rows * num_cols;
             std::vector<GoldilocksExt2> matrix;
             matrix.reserve(total);
-            //C++ 函数实参求值顺序未定义, 必须用具名局部变量强制 LTR 求值, 否则与 Rust 不一致。
+            // 具名局部变量强制 LTR 求值, 否则与 Rust 不一致
             for (std::size_t i = 0; i < total; ++i) {
                 const auto c0 = Goldilocks::from_u64(rng.next());
                 const auto c1 = Goldilocks::from_u64(rng.next());
@@ -667,7 +675,7 @@ int main() {
             run_leaves(1, "field64_2-blake3", blake3_eng, leaves, num_rows, num_cols, msg_size);
         }
 
-        //CASE 2: GoldilocksExt3, Sha2, 3 × 5 (msg = 120)
+        // CASE 2: GoldilocksExt3, Sha2, 3 × 5 (msg = 120)
         {
             const std::size_t num_rows = 3, num_cols = 5;
             const std::size_t total = num_rows * num_cols;
@@ -687,7 +695,7 @@ int main() {
             run_leaves(2, "field64_3-sha2", sha2_eng, leaves, num_rows, num_cols, msg_size);
         }
 
-        //CASE 3: Goldilocks, Sha2, 2 × 4 (msg = 32)
+        // CASE 3: Goldilocks, Sha2, 2 × 4 (msg = 32)
         {
             const std::size_t num_rows = 2, num_cols = 4;
             const std::size_t total = num_rows * num_cols;
@@ -704,7 +712,7 @@ int main() {
             run_leaves(3, "field64-sha2", sha2_eng, leaves, num_rows, num_cols, msg_size);
         }
 
-        //CASE 4: Goldilocks, Copy, 3 × 4 (msg = 32)
+        // CASE 4: Goldilocks, Copy, 3 × 4 (msg = 32)
         {
             const std::size_t num_rows = 3, num_cols = 4;
             const std::size_t total = num_rows * num_cols;
@@ -722,7 +730,7 @@ int main() {
         }
     }
 
-    //challenge_indices 纯函数: entropy bytes → indices, 与 Rust dumper 字节级一致。
+    // challenge_indices: entropy bytes → indices, 与 Rust dumper 字节级一致
     std::printf("# SECTION challenge_indices\n");
     {
         namespace ci = whir::protocols::challenge_indices;

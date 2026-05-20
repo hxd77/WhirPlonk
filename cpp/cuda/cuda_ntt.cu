@@ -13,9 +13,6 @@
 
 using namespace cuda_goldilocks;
 
-// ---- 常量 ----
-static constexpr uint32_t BLOCK_SIZE = 256;  // threads per block
-
 // =============================================================================
 // Radix-2 NTT 蝴蝶内核
 //
@@ -31,16 +28,14 @@ static constexpr uint32_t BLOCK_SIZE = 256;  // threads per block
 // =============================================================================
 __global__ void ntt_radix2_kernel(
     uint64_t* data, const uint64_t* roots,
-    uint32_t n, uint32_t stride)
+    uint32_t n, uint32_t stride, uint32_t batches)
 {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t half_n = n / 2;
     uint32_t batch = tid / half_n;          // 哪个 NTT 批次
     uint32_t pair  = tid % half_n;          // 批次内的哪个蝴蝶对
-    uint32_t total_pairs = half_n * ((blockDim.x * gridDim.x + half_n - 1) / half_n);
-
     // 每个 thread 可能处理多对 (grid-stride loop)
-    for (; tid < total_pairs; tid += blockDim.x * gridDim.x) {
+    for (; tid < half_n * batches; tid += blockDim.x * gridDim.x) {
         batch = tid / half_n;
         pair  = tid % half_n;
         uint32_t base  = batch * n;                  // 批次起始偏移
@@ -74,17 +69,17 @@ __global__ void ntt_radix2_kernel(
 // =============================================================================
 __global__ void ntt_radix4_kernel(
     uint64_t* data, const uint64_t* roots,
-    uint32_t n, uint32_t stride)
+    uint32_t n, uint32_t stride, uint32_t batches)
 {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t num_blocks = (n + 3) / 4;
-    uint32_t total_blocks = num_blocks * ((blockDim.x * gridDim.x + num_blocks - 1) / num_blocks);
+    uint32_t total_blocks = num_blocks * batches;
 
     for (uint32_t bid = tid; bid < total_blocks; bid += blockDim.x * gridDim.x) {
         uint32_t batch = bid / num_blocks;
         uint32_t blk   = bid % num_blocks;
         uint32_t base  = batch * n + blk * 4;
-        uint32_t pair_root = blk * stride;  // twiddle 单位根索引
+        uint32_t pair_root = stride;  // size-4 twiddle 单位根索引
 
         // 加载 4 个元素到寄存器
         uint64_t v0 = data[base + 0];
@@ -128,67 +123,70 @@ __global__ void ntt_radix4_kernel(
 // =============================================================================
 __global__ void apply_twiddles_kernel(
     uint64_t* data, const uint64_t* roots,
-    uint32_t rows, uint32_t cols, uint32_t step)
+    uint32_t rows, uint32_t cols, uint32_t step, uint32_t batches)
 {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t total = rows * cols;
+    uint32_t matrix_size = rows * cols;
+    uint32_t total = matrix_size * batches;
 
     for (uint32_t idx = tid; idx < total; idx += blockDim.x * gridDim.x) {
-        uint32_t i = idx / cols;  // 行号
-        uint32_t j = idx % cols;  // 列号
+        uint32_t local = idx % matrix_size;
+        uint32_t i = local / cols;  // 行号
+        uint32_t j = local % cols;  // 列号
         if (i == 0 || j == 0) continue;  // 跳过第 0 行和第 0 列
 
-        uint32_t root_idx = (i * step * j) % (total * step);  // 单位根索引
-        // 简化: roots 长度 = total * step, 使用乘积索引
-        uint32_t r = (static_cast<uint64_t>(i) * j * step) % (total * step);
+        uint32_t r = (static_cast<uint64_t>(i) * j * step) % (matrix_size * step);
         data[idx] = mont_mul(data[idx], roots[r]);
     }
 }
 
 // =============================================================================
-// 矩阵转置内核 (通过 shared memory tile)
+// 矩阵转置内核 (out-of-place)
 //
-// 算法: 将 rows×cols 矩阵切分为 TILE_DIM×TILE_DIM 的 tile,
-//   每个 tile 通过 shared memory 完成转置.
-//
-// 线程映射: 2D thread block (TILE_DIM, TILE_DIM),
-//   覆盖 src_tile[i][j] → dst_tile[j][i].
+// 每个 thread 处理一个矩阵元素。该版本比 tiled shared-memory 版本在 T400
+// 上更快；主要瓶颈仍是递归层级和全局内存流量，而非单次 tile 内重排。
 // =============================================================================
-static constexpr uint32_t TILE_DIM = 32;  // 32×32 = 1024 个线程, 与 block size 匹配
-
 __global__ void transpose_kernel(
-    uint64_t* data, uint32_t rows, uint32_t cols)
+    const uint64_t* src, uint64_t* dst, uint32_t rows, uint32_t cols, uint32_t batches)
 {
-    __shared__ uint64_t tile[TILE_DIM][TILE_DIM + 1];  // +1 避免 bank conflict
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t matrix_size = rows * cols;
+    uint32_t total = matrix_size * batches;
+    for (uint32_t idx = tid; idx < total; idx += blockDim.x * gridDim.x) {
+        uint32_t batch = idx / matrix_size;
+        uint32_t local = idx % matrix_size;
+        uint32_t row = local / cols;
+        uint32_t col = local % cols;
+        dst[batch * matrix_size + col * rows + row] = src[idx];
+    }
+}
 
-    uint32_t bx = blockIdx.x * TILE_DIM;  // 当前 tile 在 cols 维的起始位置
-    uint32_t by = blockIdx.y * TILE_DIM;  // 当前 tile 在 rows 维的起始位置
-    uint32_t tx = threadIdx.x;            // thread 在 tile 内的列
-    uint32_t ty = threadIdx.y;            // thread 在 tile 内的行
+// =============================================================================
+// Reed-Solomon 编码输入打包内核
+//
+// 输入:  coeffs[poly_index * poly_size + coeff_index]
+// 输出:  out[poly_index * (codeword_length * depth)
+//           + block_index * codeword_length + intra_block_index]
+//
+// 每个 thread 复制一个原始系数。out 由 host 侧 cudaMemset 预先清零，因此
+// codeword 中 message_length 之后的元素自然保持为 0。
+// =============================================================================
+__global__ void pack_rs_coeffs_kernel(
+    const uint64_t* coeffs, uint64_t* out,
+    uint32_t poly_size, uint32_t codeword_length,
+    uint32_t interleaving_depth, uint32_t num_polys)
+{
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t total_coeffs = poly_size * num_polys;
+    uint32_t message_length = poly_size / interleaving_depth;
+    uint32_t per_poly_size = codeword_length * interleaving_depth;
 
-    // 源位置 (在原始矩阵中)
-    uint32_t src_row = by + ty;
-    uint32_t src_col = bx + tx;
-    // 目标位置 (在转置后矩阵中) — 交换行列
-    uint32_t dst_row = bx + ty;
-    uint32_t dst_col = by + tx;
-
-    // 从全局内存读取到 shared memory tile
-    if (src_row < rows && src_col < cols)
-        tile[ty][tx] = data[src_row * cols + src_col];
-
-    __syncthreads();
-
-    // 从 shared memory 写出到全局内存 (交换行列访问)
-    if (dst_row < cols && dst_col < rows) {
-        // 转置后: dst_row 对应原始列, dst_col 对应原始行
-        // 只处理上半三角避免重复交换 (方阵时)
-        if (rows == cols) {
-            if (src_row < src_col)  // 只交换上三角
-                data[dst_row * rows + dst_col] = tile[ty][tx];
-        } else {
-            data[dst_row * rows + dst_col] = tile[ty][tx];
-        }
+    for (uint32_t idx = tid; idx < total_coeffs; idx += blockDim.x * gridDim.x) {
+        uint32_t poly = idx / poly_size;
+        uint32_t coeff = idx % poly_size;
+        uint32_t block = coeff / message_length;
+        uint32_t intra = coeff % message_length;
+        out[poly * per_poly_size + block * codeword_length + intra] = coeffs[idx];
     }
 }
 
@@ -202,13 +200,184 @@ __global__ void encode_to_bytes_kernel(
     const uint64_t* values, uint8_t* out, uint32_t count)
 {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= count) return;
+    for (; idx < count; idx += blockDim.x * gridDim.x) {
+        uint64_t v = from_mont(values[idx]);         // 退出 Montgomery 域
+        uint8_t* dst = out + static_cast<uint64_t>(idx) * 8u;
+        // 小端序写入 (对应 CPU write_u64_le)
+        for (int b = 0; b < 8; ++b)
+            dst[b] = static_cast<uint8_t>((v >> (8 * b)) & 0xFFu);
+    }
+}
 
-    uint64_t v = from_mont(values[idx]);         // 退出 Montgomery 域
-    uint8_t* dst = out + idx * 8;
-    // 小端序写入 (对应 CPU write_u64_le)
-    for (int b = 0; b < 8; ++b)
-        dst[b] = static_cast<uint8_t>((v >> (8 * b)) & 0xFFu);
+// =============================================================================
+// SHA-256 批量哈希内核
+//
+// 每个 thread 处理一条独立消息。此实现优先保证确定性和工程切点清晰，
+// 用于把 RS leaf bytes 留在 GPU 上并只回传 32B leaf hashes。
+// =============================================================================
+__device__ __constant__ uint32_t SHA256_K[64] = {
+    0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
+    0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+    0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
+    0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+    0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+    0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+    0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
+    0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+    0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
+    0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+    0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
+    0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+    0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
+    0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+    0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+    0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u,
+};
+
+__device__ __forceinline__ uint32_t rotr32(uint32_t x, uint32_t n) {
+    return (x >> n) | (x << (32u - n));
+}
+
+__device__ __forceinline__ uint32_t load_be32(const uint8_t* p) {
+    return (static_cast<uint32_t>(p[0]) << 24) |
+           (static_cast<uint32_t>(p[1]) << 16) |
+           (static_cast<uint32_t>(p[2]) << 8) |
+           static_cast<uint32_t>(p[3]);
+}
+
+__device__ __forceinline__ void sha256_compress(uint32_t state[8], const uint8_t block[64]) {
+    uint32_t w[64];
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) w[i] = load_be32(block + i * 4);
+    #pragma unroll
+    for (int i = 16; i < 64; ++i) {
+        const uint32_t s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        const uint32_t s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
+    uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
+    #pragma unroll
+    for (int i = 0; i < 64; ++i) {
+        const uint32_t S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+        const uint32_t ch = (e & f) ^ ((~e) & g);
+        const uint32_t temp1 = h + S1 + ch + SHA256_K[i] + w[i];
+        const uint32_t S0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+        const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+        const uint32_t temp2 = S0 + maj;
+        h = g; g = f; f = e; e = d + temp1;
+        d = c; c = b; b = a; a = temp1 + temp2;
+    }
+    state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+    state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+}
+
+__global__ void sha256_hash_many_kernel(
+    const uint8_t* input, uint8_t* output, uint32_t message_size, uint32_t count)
+{
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    for (uint32_t msg = tid; msg < count; msg += blockDim.x * gridDim.x) {
+        const uint8_t* src = input + static_cast<uint64_t>(msg) * message_size;
+        uint8_t* dst = output + static_cast<uint64_t>(msg) * 32u;
+        uint32_t state[8] = {
+            0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+            0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
+        };
+
+        uint32_t full_blocks = message_size / 64u;
+        for (uint32_t b = 0; b < full_blocks; ++b) {
+            uint8_t block[64];
+            #pragma unroll
+            for (int i = 0; i < 64; ++i) block[i] = src[b * 64u + i];
+            sha256_compress(state, block);
+        }
+
+        uint8_t block[64] = {};
+        uint32_t rem = message_size & 63u;
+        for (uint32_t i = 0; i < rem; ++i) block[i] = src[full_blocks * 64u + i];
+        block[rem] = 0x80u;
+        if (rem >= 56u) {
+            sha256_compress(state, block);
+            #pragma unroll
+            for (int i = 0; i < 64; ++i) block[i] = 0;
+        }
+        const uint64_t bit_len = static_cast<uint64_t>(message_size) * 8u;
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            block[63 - i] = static_cast<uint8_t>((bit_len >> (8 * i)) & 0xffu);
+        }
+        sha256_compress(state, block);
+
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            dst[i * 4 + 0] = static_cast<uint8_t>(state[i] >> 24);
+            dst[i * 4 + 1] = static_cast<uint8_t>(state[i] >> 16);
+            dst[i * 4 + 2] = static_cast<uint8_t>(state[i] >> 8);
+            dst[i * 4 + 3] = static_cast<uint8_t>(state[i]);
+        }
+    }
+}
+
+__device__ __forceinline__ void store_goldilocks_le_element(uint64_t value, uint8_t* dst)
+{
+    const uint64_t v = from_mont(value);
+    #pragma unroll
+    for (int b = 0; b < 8; ++b) {
+        dst[b] = static_cast<uint8_t>((v >> (8u * b)) & 0xffu);
+    }
+}
+
+__global__ void sha256_hash_goldilocks_rows_kernel(
+    const uint64_t* input, uint8_t* output, uint32_t row_elements, uint32_t count)
+{
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t message_size = row_elements * 8u;
+    for (uint32_t msg = tid; msg < count; msg += blockDim.x * gridDim.x) {
+        const uint64_t* src = input + static_cast<uint64_t>(msg) * row_elements;
+        uint8_t* dst = output + static_cast<uint64_t>(msg) * 32u;
+        uint32_t state[8] = {
+            0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+            0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
+        };
+
+        uint32_t full_blocks = row_elements / 8u;
+        for (uint32_t b = 0; b < full_blocks; ++b) {
+            uint8_t block[64];
+            #pragma unroll
+            for (int e = 0; e < 8; ++e) {
+                store_goldilocks_le_element(src[b * 8u + static_cast<uint32_t>(e)], block + e * 8);
+            }
+            sha256_compress(state, block);
+        }
+
+        uint8_t block[64] = {};
+        uint32_t rem_elements = row_elements & 7u;
+        uint32_t rem = rem_elements * 8u;
+        for (uint32_t e = 0; e < rem_elements; ++e) {
+            store_goldilocks_le_element(src[full_blocks * 8u + e], block + e * 8u);
+        }
+        block[rem] = 0x80u;
+        if (rem >= 56u) {
+            sha256_compress(state, block);
+            #pragma unroll
+            for (int i = 0; i < 64; ++i) block[i] = 0;
+        }
+        const uint64_t bit_len = static_cast<uint64_t>(message_size) * 8u;
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            block[63 - i] = static_cast<uint8_t>((bit_len >> (8 * i)) & 0xffu);
+        }
+        sha256_compress(state, block);
+
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            dst[i * 4 + 0] = static_cast<uint8_t>(state[i] >> 24);
+            dst[i * 4 + 1] = static_cast<uint8_t>(state[i] >> 16);
+            dst[i * 4 + 2] = static_cast<uint8_t>(state[i] >> 8);
+            dst[i * 4 + 3] = static_cast<uint8_t>(state[i]);
+        }
+    }
 }
 
 // =============================================================================
@@ -222,16 +391,28 @@ __global__ void encode_ext3_to_bytes_kernel(
     uint8_t* out, uint32_t count)
 {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= count) return;
+    for (; idx < count; idx += blockDim.x * gridDim.x) {
+        uint8_t* dst = out + static_cast<uint64_t>(idx) * 24u;
+        uint64_t v0 = from_mont(c0[idx]);
+        uint64_t v1 = from_mont(c1[idx]);
+        uint64_t v2 = from_mont(c2[idx]);
+        for (int b = 0; b < 8; ++b) {
+            dst[b + 0]  = static_cast<uint8_t>((v0 >> (8 * b)) & 0xFFu);
+            dst[b + 8]  = static_cast<uint8_t>((v1 >> (8 * b)) & 0xFFu);
+            dst[b + 16] = static_cast<uint8_t>((v2 >> (8 * b)) & 0xFFu);
+        }
+    }
+}
 
-    uint8_t* dst = out + idx * 24;
-    uint64_t v0 = from_mont(c0[idx]);
-    uint64_t v1 = from_mont(c1[idx]);
-    uint64_t v2 = from_mont(c2[idx]);
-    for (int b = 0; b < 8; ++b) {
-        dst[b + 0]  = static_cast<uint8_t>((v0 >> (8 * b)) & 0xFFu);
-        dst[b + 8]  = static_cast<uint8_t>((v1 >> (8 * b)) & 0xFFu);
-        dst[b + 16] = static_cast<uint8_t>((v2 >> (8 * b)) & 0xFFu);
+__global__ void gather_hashes_kernel(
+    const uint8_t* nodes, const uint64_t* node_indices, uint8_t* out, uint32_t count)
+{
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    for (; idx < count; idx += blockDim.x * gridDim.x) {
+        const uint8_t* src = nodes + node_indices[idx] * 32u;
+        uint8_t* dst = out + static_cast<uint64_t>(idx) * 32u;
+        #pragma unroll
+        for (int b = 0; b < 32; ++b) dst[b] = src[b];
     }
 }
 
@@ -248,39 +429,50 @@ __global__ void encode_ext3_to_bytes_kernel(
 namespace whir::cuda {
 
 static constexpr uint32_t BLOCK = 256;
-static constexpr uint32_t BLOCK_2D = 32;
 
 void launch_ntt_radix2(uint64_t* data, const uint64_t* roots,
-                       uint32_t n, uint32_t stride) {
-    uint32_t half_n = n / 2;
-    uint32_t grid = div_up(half_n, BLOCK);
+                       uint32_t n, uint32_t stride, uint32_t batches) {
+    uint32_t total_pairs = (n / 2) * batches;
+    uint32_t grid = div_up(total_pairs, BLOCK);
     grid = std::min(grid, 4096u);
-    ntt_radix2_kernel<<<grid, BLOCK>>>(data, roots, n, stride);
+    ntt_radix2_kernel<<<grid, BLOCK>>>(data, roots, n, stride, batches);
     CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_ntt_radix4(uint64_t* data, const uint64_t* roots,
-                       uint32_t n, uint32_t stride) {
-    uint32_t n_blocks = n / 4;
-    uint32_t grid = div_up(n_blocks, BLOCK);
+                       uint32_t n, uint32_t stride, uint32_t batches) {
+    uint32_t total_blocks = (n / 4) * batches;
+    uint32_t grid = div_up(total_blocks, BLOCK);
     grid = std::min(grid, 4096u);
-    ntt_radix4_kernel<<<grid, BLOCK>>>(data, roots, n, stride);
+    ntt_radix4_kernel<<<grid, BLOCK>>>(data, roots, n, stride, batches);
     CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_apply_twiddles(uint64_t* data, const uint64_t* roots,
-                           uint32_t rows, uint32_t cols, uint32_t step) {
-    uint32_t total = rows * cols;
+                           uint32_t rows, uint32_t cols, uint32_t step, uint32_t batches) {
+    uint32_t total = rows * cols * batches;
     uint32_t grid = div_up(total, BLOCK);
     grid = std::min(grid, 4096u);
-    apply_twiddles_kernel<<<grid, BLOCK>>>(data, roots, rows, cols, step);
+    apply_twiddles_kernel<<<grid, BLOCK>>>(data, roots, rows, cols, step, batches);
     CUDA_CHECK(cudaGetLastError());
 }
 
-void launch_transpose(uint64_t* data, uint32_t rows, uint32_t cols) {
-    dim3 block(BLOCK_2D, BLOCK_2D);
-    dim3 grid(div_up(cols, BLOCK_2D), div_up(rows, BLOCK_2D));
-    transpose_kernel<<<grid, block>>>(data, rows, cols);
+void launch_transpose(const uint64_t* src, uint64_t* dst, uint32_t rows, uint32_t cols, uint32_t batches) {
+    uint32_t total = rows * cols * batches;
+    uint32_t grid = div_up(total, BLOCK);
+    grid = std::min(grid, 4096u);
+    transpose_kernel<<<grid, BLOCK>>>(src, dst, rows, cols, batches);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_pack_rs_coeffs(const uint64_t* coeffs, uint64_t* out,
+                           uint32_t poly_size, uint32_t codeword_length,
+                           uint32_t interleaving_depth, uint32_t num_polys) {
+    uint32_t total = poly_size * num_polys;
+    uint32_t grid = div_up(total, BLOCK);
+    grid = std::min(grid, 4096u);
+    pack_rs_coeffs_kernel<<<grid, BLOCK>>>(coeffs, out, poly_size, codeword_length,
+                                           interleaving_depth, num_polys);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -288,6 +480,38 @@ void launch_encode_to_bytes(const uint64_t* values, uint8_t* out, uint32_t count
     uint32_t grid = div_up(count, BLOCK);
     grid = std::min(grid, 4096u);
     encode_to_bytes_kernel<<<grid, BLOCK>>>(values, out, count);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_sha256_hash_many(const uint8_t* input, uint8_t* output,
+                             uint32_t message_size, uint32_t count) {
+    uint32_t grid = div_up(count, BLOCK);
+    grid = std::min(grid, 4096u);
+    sha256_hash_many_kernel<<<grid, BLOCK>>>(input, output, message_size, count);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_sha256_hash_goldilocks_rows(const uint64_t* input, uint8_t* output,
+                                        uint32_t row_elements, uint32_t count) {
+    static constexpr uint32_t CHUNK = 65536;
+    for (uint32_t base = 0; base < count; base += CHUNK) {
+        const uint32_t chunk = std::min(CHUNK, count - base);
+        uint32_t grid = div_up(chunk, BLOCK);
+        grid = std::min(grid, 256u);
+        sha256_hash_goldilocks_rows_kernel<<<grid, BLOCK>>>(
+            input + static_cast<uint64_t>(base) * row_elements,
+            output + static_cast<uint64_t>(base) * 32u,
+            row_elements, chunk);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+void launch_gather_hashes(const uint8_t* nodes, const uint64_t* node_indices,
+                          uint8_t* out, uint32_t count) {
+    if (count == 0) return;
+    uint32_t grid = div_up(count, BLOCK);
+    grid = std::min(grid, 4096u);
+    gather_hashes_kernel<<<grid, BLOCK>>>(nodes, node_indices, out, count);
     CUDA_CHECK(cudaGetLastError());
 }
 

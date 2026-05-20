@@ -1,24 +1,16 @@
 #pragma once
 
-// =============================================================================
-// transpose.hpp — 原地矩阵转置 (cache-oblivious 算法)。
-// 对应 WHIR 中的 src/algebra/ntt/transpose.rs。
+// ============================================================================
+// transpose.hpp — 原地矩阵转置（缓存无关算法）
 //
-// 提供对连续存储的矩阵做原地转置的能力。当 rows 和 cols 均为 2 的幂时,
-// 使用 cache-oblivious 递归分块算法, 否则退化到 buffer 式直接转置。
+// 对行主序连续存储的矩阵提供原地转置。当两个维度均为 2 的幂时，
+// 使用缓存无关的递归分块策略；否则回退至基于缓冲区的拷贝。
 //
-// 接口:
-//   transpose<F>(matrix, rows, cols) — 原地转置, matrix 是 rows*cols 个
-//     F 元素的连续块 (可以包含多个矩阵, 长度 = N * rows * cols)
+// 递归切换至直接循环的阈值为 workload_size<F>() = 32KB / sizeof(F)，
+// 确保单个子块可舒适地放入 L1 缓存。
 //
-// 内部实现 (detail 命名空间):
-//   transpose_copy(src, dst)        — 带 buffer 的转置 (source → destination)
-//   transpose_square_swap(a, b)     — 交换两个方阵并同时转置
-//   transpose_square(m)             — 方阵的 cache-oblivious 原地转置
-//
-// 阈值: workload_size<F>() = 32KB / sizeof(F), 小于此阈值时直接循环转置,
-// 避免递归开销; 大于时采用递归分块策略减少缓存失效。
-// =============================================================================
+// 对应 Rust 源文件：src/algebra/ntt/transpose.rs
+// ============================================================================
 
 #include "matrix.hpp"
 #include "utils.hpp"
@@ -36,19 +28,8 @@ namespace detail {
 
 using ::whir::workload_size;
 
-// ---------------------------------------------------------------------------
-// transpose_copy(src, dst) — 将矩阵 src 转置后写入 dst (src 和 dst 不重叠)。
-//
-// 输入:
-//   src — MatrixMut<F>, rows×cols 的源矩阵
-//   dst — MatrixMut<F>, cols×rows 的目标矩阵 (dst.rows() == src.cols()
-//         且 dst.cols() == src.rows())
-//
-// 算法:
-//   当 rows*cols*2 ≤ workload_size<F>() 时, 直接双重循环逐元素复制。
-//   否则沿长边切分两半, 递归处理 — 这是 cache-oblivious 策略:
-//   每次切分让子问题变小, 最终落入快速路径或 L1 缓存。
-// ---------------------------------------------------------------------------
+// 将 src 转置复制到 dst（不重叠）。沿较长维度递归分割直至子问题适配缓存，
+// 然后使用逐元素拷贝循环。
 template <typename F>
 void transpose_copy(MatrixMut<F> src, MatrixMut<F> dst) {
     assert(src.rows() == dst.cols());
@@ -56,61 +37,78 @@ void transpose_copy(MatrixMut<F> src, MatrixMut<F> dst) {
     const std::size_t rows = src.rows();
     const std::size_t cols = src.cols();
 
-    // 小矩阵直接逐元素转置, 避免递归开销。
-    if (rows * cols * 2 <= workload_size<F>()) {
+    // 总数据量适配缓存阈值时使用直接循环
+    if (rows * cols * 2 <= workload_size<F>()) { //如果当前src+dst的总访问数据量足够小,可以放进缓存,就直接用双重循环完成转置
         for (std::size_t i = 0; i < rows; ++i) {
             for (std::size_t j = 0; j < cols; ++j) {
-                *dst.ptr_at_mut(j, i) = *src.ptr_at(i, j);
+                *dst.ptr_at_mut(j, i) = *src.ptr_at(i, j); //ptr_at(i,j)表示src第i行、第j列的元素, ptr_at_mut(j,i)表示获取dst第j行、第i列的可写指针
             }
         }
         return;
     }
 
-    // 沿较长的一维切分递归。
-    if (rows > cols) {
+    // 沿较长维度分割以保持子问题近似方阵
+    if (rows > cols) { //如果src行数更多,就沿着行方向切src
+        //假如src=6*2,即
+        //a b
+        //c d
+        //e f
+        //g h
+        //i j
+        //k l 
+        //->s1 = 前 3 行
+        //a b
+        //c d
+        //e f
+        //
+        //s2 = 后 3 行
+        //g h
+        //i j
+        //k l
         const std::size_t split = rows / 2;
         auto [s1, s2] = src.split_vertical(split);
         auto [d1, d2] = dst.split_horizontal(split);
         transpose_copy<F>(s1, d1);
         transpose_copy<F>(s2, d2);
     } else {
+        //rows<=cols的情况,如果列数多,就沿着列方向切src
+        //假设src=2*6
+        //例如
+        //a b c d e f
+        //g h i j k l
+        //按列切成左右两块
+        //s1:
+        //a b c
+        //g h i
+        //
+        //s2:
+        //d e f
+        //j k l
         const std::size_t split = cols / 2;
-        auto [s1, s2] = src.split_horizontal(split);
-        auto [d1, d2] = dst.split_vertical(split);
+        auto [s1, s2] = src.split_horizontal(split); //对src按列切成左右两块
+        auto [d1, d2] = dst.split_vertical(split); //对dst按行切成上下两块
         transpose_copy<F>(s1, d1);
         transpose_copy<F>(s2, d2);
     }
 }
 
-// ---------------------------------------------------------------------------
-// transpose_square_swap(a, b) — 交换两个同尺寸方阵的内容并同时转置。
-//
-// 输入:
-//   a, b — 两个 size×size 的方阵 (size 是 2 的幂), 满足
-//          a 和 b 互为转置维度的关系 (a.rows == b.cols, a.cols == b.rows)
-//
-// 效果: 执行后 a[i][j] ↔ b[j][i] (交换并转置)
-//
-// 算法:
-//   size ≤ 8: 直接双重循环交换
-//   否则且 2*size*size > workload: 四象限递归
-//   否则: 2×2 块展开交换
-//
-// 这是方阵原地转置的核心辅助函数: 把矩阵分成四个象限后,
-// 对角线上的两个象限 (a 和 d) 各自递归转置,
-// 反对角线上的两个象限 (b 和 c) 通过此函数交换并转置。
-// ---------------------------------------------------------------------------
+// 交换两个同尺寸方阵的内容并同时转置：返回后 a[i][j] 存储原 b[j][i]，反之亦然。
+//把两个方阵块a和b互相交换,同时交换时做转置
+//a[i][j] 变成 原来的 b[j][i]
+//b[j][i] 变成 原来的 a[i][j]
+// 这是递归方阵转置的核心辅助函数：将矩阵分割为四象限 A,B,C,D 后，
+// 对角块 (A,D) 递归转置，非对角块 (B,C) 通过此函数交换并转置。
 template <typename F>
 void transpose_square_swap(MatrixMut<F> a, MatrixMut<F> b) {
-    assert(a.is_square());
+    assert(a.is_square()); //必须是方阵
     assert(a.rows() == b.cols());
     assert(a.cols() == b.rows());
-    assert(is_power_of_two(a.rows()));
+    assert(is_power_of_two(a.rows())); //边长必须是2的幂
 
-    const std::size_t size = a.rows();
+    const std::size_t size = a.rows(); 
 
-    // ≤8×8: 直接交换, 递归开销大于计算开销。
-    if (size <= 8) {
+    // 小块直接双层循环（递归开销超过计算量）
+    if (size <= 8) { //矩阵边长小于等于8时，直接暴力交换
         for (std::size_t i = 0; i < size; ++i) {
             for (std::size_t j = 0; j < size; ++j) {
                 std::swap(*a.ptr_at_mut(i, j), *b.ptr_at_mut(j, i));
@@ -119,19 +117,22 @@ void transpose_square_swap(MatrixMut<F> a, MatrixMut<F> b) {
         return;
     }
 
-    // 大块继续递归子分块 (cache-oblivious 策略)。
+    // 大块递归至象限（缓存无关策略）
+    //如果a和b的总数据量太大,超过缓存有好的工作量,就递归切成4个象限处理
+    //a 的左上 A 要和 b 的左上 E 转置交换
+    //a 的右上 B 要和 b 的左下 G 转置交换
+    //a 的左下 C 要和 b 的右上 F 转置交换
+    //a 的右下 D 要和 b 的右下 H 转置交换
     if (2 * size * size > workload_size<F>()) {
         const std::size_t n = size / 2;
         auto aq = a.split_quadrants(n, n);
         auto bq = b.split_quadrants(n, n);
-        // 注意递归调用模式 (参考四象限转置公式):
-        // a ↔ b 的对角块交换同时维持转置关系
         transpose_square_swap<F>(aq.a, bq.a);
         transpose_square_swap<F>(aq.b, bq.c);
         transpose_square_swap<F>(aq.c, bq.b);
         transpose_square_swap<F>(aq.d, bq.d);
     } else {
-        // 2×2 块展开: 一次处理 2×2 的 4 个元素, 减少循环开销。
+        // 2×2 块展开：每次迭代处理 4 个元素
         for (std::size_t i = 0; i < size; i += 2) {
             for (std::size_t j = 0; j < size; j += 2) {
                 std::swap(*a.ptr_at_mut(i,     j    ), *b.ptr_at_mut(j,     i    ));
@@ -143,19 +144,13 @@ void transpose_square_swap(MatrixMut<F> a, MatrixMut<F> b) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// transpose_square(m) — 原地转置一个 size×size 方阵 (size 是 2 的幂)。
+// 方阵原地转置（规模必须为 2 的幂）。
 //
-// 输入: m — size×size 的方阵 MatrixMut (size 为 2 的幂)
-// 效果: 原地转置
+// 象限分解：分割为 A(左上)、B(右上)、C(左下)、D(右下)，然后：
+//   - 对角块 A、D 递归转置（原位不动）
+//   - 非对角块 B、C 交换并转置（transpose_square_swap）
 //
-// 算法 (四象限递归):
-//   把矩阵分成 size/2 的四个子块 A(左上), B(右上), C(左下), D(右下):
-//     A  D  → 对 A 和 D 递归转置 (它们在对角线上不动)
-//     C  B  → B 和 C 通过 transpose_square_swap 交换并转置
-//   这等同于对整个矩阵原地转置。
-//   size*size ≤ workload 时退化为直接循环 (上三角交换)。
-// ---------------------------------------------------------------------------
+// 当矩阵适配缓存时回退至上三角交换循环。
 template <typename F>
 void transpose_square(MatrixMut<F> m) {
     assert(m.is_square());
@@ -165,11 +160,11 @@ void transpose_square(MatrixMut<F> m) {
     if (size * size > workload_size<F>()) {
         const std::size_t n = size / 2;
         auto q = m.split_quadrants(n, n);
-        transpose_square<F>(q.a);       // 左上递归
-        transpose_square<F>(q.d);       // 右下递归
-        transpose_square_swap<F>(q.b, q.c); // 右上 ↔ 左下
+        transpose_square<F>(q.a);
+        transpose_square<F>(q.d);
+        transpose_square_swap<F>(q.b, q.c);
     } else {
-        // 小矩阵直接上三角交换 (避免递归开销)。
+        // 上三角交换（直接循环，无递归）
         for (std::size_t i = 0; i < size; ++i) {
             for (std::size_t j = i + 1; j < size; ++j) {
                 std::swap(*m.ptr_at_mut(i, j), *m.ptr_at_mut(j, i));
@@ -180,33 +175,27 @@ void transpose_square(MatrixMut<F> m) {
 
 } // namespace detail
 
-// ---------------------------------------------------------------------------
-// transpose<F>(matrix, rows, cols) — 原地矩阵转置 (公共入口)。
+// 原地矩阵转置的公共入口。
 //
-// 输入:
-//   matrix — F 元素的连续 span, 长度必须是 rows*cols 的整数倍
-//            (即可以包含多个 rows×cols 矩阵, 逐个独立转置)
+// 参数：
+//   matrix — F 元素的连续 span，长度必须是 rows × cols 的整数倍
+//           （单次调用可独立转置多个矩阵）
 //   rows   — 每个矩阵的行数
 //   cols   — 每个矩阵的列数
 //
-// 效果: 对 matrix 中每个 rows×cols 子块原地转置为 cols×rows。
+// 算法选择：
+//   - 两个维度均非 2 的幂：基于缓冲区的拷贝转置
+//   - rows == cols（方阵，2 的幂）：递归原地转置（transpose_square）
+//   - rows != cols（均为 2 的幂）：临时缓冲区 + transpose_copy
 //
-// 算法选择:
-//   - 如果 rows 或 cols 不是 2 的幂: 使用 buffer 式转置
-//     (分配临时缓冲, transpose_copy 后回写)
-//   - 如果 rows == cols (方阵, 且为 2 的幂): 使用 transpose_square
-//     (cache-oblivious 递归原地转置)
-//   - 如果 rows ≠ cols (均为 2 的幂): 使用临时 scratch 缓冲 +
-//     transpose_copy (无法原地, 因维度改变)
-//
-// 6-step Cooley-Tukey NTT 在步骤间需要转置来改变数据排列,
-// 本函数是其核心依赖。
-// ---------------------------------------------------------------------------
+// 此函数是 6 步 Cooley-Tukey NTT 的核心依赖，用于在各步骤之间重排数据布局。
 template <typename F>
 void transpose(std::span<F> matrix, std::size_t rows, std::size_t cols) {
     assert(matrix.size() % (rows * cols) == 0);
     if (matrix.empty()) return;
 
+    // 基于缓冲区的转置：拷出后按转置顺序写回。
+    // 处理所有情况（包括非 2 的幂维度），但每块需要 O(rows×cols) 的辅助空间。
     const std::size_t block = rows * cols;
     std::vector<F> scratch(block, matrix[0]);
     for (std::size_t off = 0; off < matrix.size(); off += block) {

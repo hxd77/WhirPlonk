@@ -36,20 +36,19 @@ __device__ __constant__ constexpr uint64_t R_SQ_MOD_P  = 0xFFFFFFFE00000001ULL; 
 
 // ---- 设备端域运算 (内联, 每个函数处理一对或多对元素) ----
 
-/// Montgomery 乘法: a * b * R⁻¹ mod p
-/// 使用 128-bit 中间运算, 对标 CPU 端的 Goldilocks::operator*
+/// Goldilocks 规范表示乘法: a * b mod p.
+/// 对标 CPU 端 Goldilocks::reduce128_parts(lo, hi).
 __device__ __forceinline__ uint64_t mont_mul(uint64_t a, uint64_t b) {
-    // 计算 128-bit 乘积: a * b = hi*2^64 + lo
-    // Montgomery 约简: t = lo * MU mod 2^64, result = (a*b + t*p) >> 64
-    // 若 result >= p 则减 p
-    __uint128_t prod = __uint128_t{a} * b;
-    uint64_t lo = static_cast<uint64_t>(prod);
-    uint64_t hi = static_cast<uint64_t>(prod >> 64);
-    uint64_t t  = lo * MU;               // t = -lo/p mod 2^64
-    __uint128_t red = __uint128_t{t} * P + prod;
-    uint64_t result = static_cast<uint64_t>(red >> 64);
-    if (result >= P) result -= P;
-    return result;
+    uint64_t lo = a * b;
+    uint64_t hi = __umul64hi(a, b);
+    uint32_t hi_hi = static_cast<uint32_t>(hi >> 32);
+    uint32_t hi_lo = static_cast<uint32_t>(hi);
+
+    uint64_t t0 = lo >= hi_hi ? lo - hi_hi : P - (static_cast<uint64_t>(hi_hi) - lo);
+    uint64_t t1 = static_cast<uint64_t>(hi_lo) * MU;
+    uint64_t sum = t0 + t1;
+    if (sum < t0 || sum >= P) sum -= P;
+    return sum;
 }
 
 /// Montgomery 加法: (a + b) mod p
@@ -65,14 +64,14 @@ __device__ __forceinline__ uint64_t mont_sub(uint64_t a, uint64_t b) {
     return a - b;
 }
 
-/// 转换为规范表示 (退出 Montgomery 域): a * R⁻¹ mod p → a mod p
+/// 输入已经是规范表示.
 __device__ __forceinline__ uint64_t from_mont(uint64_t a) {
-    return mont_mul(a, 1);
+    return a;
 }
 
-/// 转换为 Montgomery 表示: a → a * R mod p
+/// 输入已经是规范表示.
 __device__ __forceinline__ uint64_t to_mont(uint64_t a) {
-    return mont_mul(a, R_SQ_MOD_P);
+    return a;
 }
 
 } // namespace cuda_goldilocks
@@ -92,7 +91,7 @@ __device__ __forceinline__ uint64_t to_mont(uint64_t a) {
 /// @param stride  单位根步长: 根表中使用的索引 = (pair_idx % (n/2)) * stride
 __global__ void ntt_radix2_kernel(
     uint64_t* data, const uint64_t* roots,
-    uint32_t n, uint32_t stride);
+    uint32_t n, uint32_t stride, uint32_t batches);
 
 /// 四阶 Cooley-Tukey 内核 (合并两层 butterfly + twiddle)
 ///
@@ -100,7 +99,13 @@ __global__ void ntt_radix2_kernel(
 /// 比两次 size-2 调用减少了一半的全局内存访问。
 __global__ void ntt_radix4_kernel(
     uint64_t* data, const uint64_t* roots,
-    uint32_t n, uint32_t stride);
+    uint32_t n, uint32_t stride, uint32_t batches);
+
+/// 小规模直接 NTT 内核.
+/// 每个 CUDA block 处理一个批次, 支持 n <= 16.
+__global__ void ntt_small_kernel(
+    uint64_t* data, const uint64_t* roots,
+    uint32_t n, uint32_t stride, uint32_t roots_len, uint32_t batches);
 
 /// Twiddle 因子乘法内核
 ///
@@ -114,18 +119,29 @@ __global__ void ntt_radix4_kernel(
 /// @param step  根表缩放步长 = roots_len / (rows*cols)
 __global__ void apply_twiddles_kernel(
     uint64_t* data, const uint64_t* roots,
-    uint32_t rows, uint32_t cols, uint32_t step);
+    uint32_t rows, uint32_t cols, uint32_t step, uint32_t batches);
 
 /// 矩阵转置内核 (out-of-place, 通过共享内存)
 ///
-/// 6-step NTT 第 1/3/6 步: 将 rows×cols 矩阵原地转置.
+/// 6-step NTT 第 1/3/6 步: 将 rows×cols 矩阵转置到独立输出缓冲.
 /// 使用 shared memory tile 优化全局内存合并访问.
 ///
-/// @param data  矩阵数据 (row-major, rows×cols 个元素)
+/// @param src   输入矩阵数据 (row-major, rows×cols 个元素)
+/// @param dst   输出矩阵数据 (row-major, cols×rows 个元素)
 /// @param rows  原始行数
 /// @param cols  原始列数
 __global__ void transpose_kernel(
-    uint64_t* data, uint32_t rows, uint32_t cols);
+    const uint64_t* src, uint64_t* dst, uint32_t rows, uint32_t cols, uint32_t batches);
+
+/// Reed-Solomon 编码输入打包内核.
+///
+/// 输入是紧凑的 coeffs[poly][coeff]，输出是已经清零的
+/// out[poly][interleaving_block][codeword_index]。每个 thread 复制一个
+/// 原始系数到对应块的前 message_length 个位置，零填充由 cudaMemset 完成。
+__global__ void pack_rs_coeffs_kernel(
+    const uint64_t* coeffs, uint64_t* out,
+    uint32_t poly_size, uint32_t codeword_length,
+    uint32_t interleaving_depth, uint32_t num_polys);
 
 /// 域元素编码内核: 将 Montgomery 域元素转为 LE 字节
 ///
@@ -137,6 +153,21 @@ __global__ void transpose_kernel(
 /// @param count   元素个数
 __global__ void encode_to_bytes_kernel(
     const uint64_t* values, uint8_t* out, uint32_t count);
+
+/// SHA-256 批量哈希内核.
+/// 每个 thread 处理一条固定长度消息 input[i*message_size ..) 并输出 32 字节 digest.
+__global__ void sha256_hash_many_kernel(
+    const uint8_t* input, uint8_t* output, uint32_t message_size, uint32_t count);
+
+/// SHA-256 Goldilocks leaf 哈希内核.
+/// 每个 thread 处理转置后矩阵的一行: from_mont(values) -> LE 字节流 -> digest.
+__global__ void sha256_hash_goldilocks_rows_kernel(
+    const uint64_t* input, uint8_t* output, uint32_t row_elements, uint32_t count);
+
+/// 指定 Merkle node index 的 32B hash gather 内核.
+/// 每个 thread 复制一个 hash: out[i] = nodes[node_indices[i]].
+__global__ void gather_hashes_kernel(
+    const uint8_t* nodes, const uint64_t* node_indices, uint8_t* out, uint32_t count);
 
 /// GoldilocksExt3 编码内核: 三个基域分量分别编码
 /// 每元素 24 字节 = c0(8B) + c1(8B) + c2(8B), 均为 LE

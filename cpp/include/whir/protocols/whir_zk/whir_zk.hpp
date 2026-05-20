@@ -1,31 +1,20 @@
 #pragma once
 
-// =============================================================================
-// whir_zk.hpp — Zero-Knowledge WHIR 协议核心类型。
-// 对应 WHIR 中的 src/protocols/whir_zk/mod.rs。
+// ============================================================================
+// whir_zk.hpp — 零知识 WHIR 协议核心类型定义
 //
-// ZK WHIR 是 WHIR 的零知识变体: 证明者在不泄露多项式信息的情况下
-// 证明对多项式的求值声明。核心思路:
-//   1. 引入随机盲化多项式 (BlindingPolynomials) 掩盖原始多项式
-//   2. 承诺 f_hat = f + mask (mask 是周期性的盲化多项式)
-//   3. 同时承诺盲化多项式本身 (blinding commitment)
-//   4. 证明者和验证者对 f_hat 和 blinding 各运行一轮 WHIR
-//   5. 通过挑战值的约束关系确保盲化正确
+// ZK WHIR 在 WHIR 基础上扩展零知识性: 证明者证明多项式求值
+// 而不泄露多项式本身的值。
 //
-// 核心类型:
-//   BlindingSizePolicy — 盲化多项式大小的策略参数
-//   ZkConfig<F>       — ZK WHIR 协议配置
-//   ZkCommitment<F>   — ZK 承诺 (f_hat 承诺列表 + blinding 承诺)
-//   ZkWitness<F>      — ZK 见证 (f_hat 向量 + blinding 多项式)
+// 机制:
+//   1. 采样随机盲化多项式（BlindingPolynomials）
+//   2. 承诺 f_hat = f + mask（mask 是周期性盲化多项式）
+//   3. 同时承诺盲化多项式（blinding commitment）
+//   4. 运行两个内部 WHIR 实例: 一个用于 f_hat，一个用于 blinding
+//   5. 挑战约束强制盲化正确性
 //
-// 关键方法:
-//   ZkConfig::commit(prover_state, polynomials, rng)
-//     — 采样盲化多项式, 构造 f_hat = f + mask, 双重承诺
-//   ZkConfig::prove(prover_state, vectors, witness, linear_forms, evaluations, rng)
-//     — 11 步 ZK WHIR 证明
-//   ZkConfig::verify(verifier_state, weights, evaluations, commitment)
-//     — 9 步 ZK WHIR 验证
-// =============================================================================
+// 对应 Rust 文件: src/protocols/whir_zk/mod.rs
+// ============================================================================
 
 #include "../whir/whir.hpp"
 #include "whir_zk_utils.hpp"
@@ -43,30 +32,25 @@ namespace whir::protocols::whir_zk {
 
 using ::whir::algebra::ntt::trailing_zeros;
 
-// =============================================================================
-// BlindingSizePolicy — 盲化多项式的大小策略。
+// ============================================================================
+// BlindingSizePolicy — 控制盲化多项式规模
 //
-// 控制盲化多项式的规模, 从而决定零知识的安全性和性能。
-// 参数含义:
-//   q_delta_1, q_delta_2 — 域内查询数的下界 (两个安全级别)
-//   t1, t2              — 域内查询数 (通常 = q_delta_1/2)
-//   sumcheck_round_degree — sumcheck 每轮的次数 (默认 3)
+// 参数:
+//   q_delta_1, q_delta_2 — 域内查询数的下界（两个安全级别）
+//   t1, t2               — 域内查询数（通常 = q_delta_1/2）
+//   sumcheck_round_degree — 每轮 sumcheck 次数（默认 3）
 //
-// 从 ProtocolParameters 自动推导:
-//   from_whir_params(params) → BlindingSizePolicy
-// 内部使用 num_in_domain_queries() 根据安全级别和码率计算所需查询数。
-// =============================================================================
+// 由 ProtocolParameters 通过 from_whir_params() 推导
+// ============================================================================
 
 struct BlindingSizePolicy {
-    std::size_t q_delta_1 = 0;   // 域内查询数 (主安全级别)
-    std::size_t q_delta_2 = 0;   // 域内查询数 (宽松安全级别)
-    std::size_t t1 = 0;          // 查询数副本 1
-    std::size_t t2 = 0;          // 查询数副本 2
-    std::size_t sumcheck_round_degree = 3; // sumcheck 次数
+    std::size_t q_delta_1 = 0;
+    std::size_t q_delta_2 = 0;
+    std::size_t t1 = 0;
+    std::size_t t2 = 0;
+    std::size_t sumcheck_round_degree = 3;
 
-    // 从协议参数构造策略。
-    // 输入: params — ProtocolParameters (安全级别, pow_bits, starting_log_inv_rate, unique_decoding)
-    // 输出: BlindingSizePolicy (q1, q2, t1, t2, degree=3)
+    // 从协议参数构造
     static BlindingSizePolicy from_whir_params(const ::whir::ProtocolParameters& params) {
         double sec_level = static_cast<double>(params.security_level);
         double sec_level_main = static_cast<double>(params.security_level - params.pow_bits);
@@ -85,24 +69,18 @@ struct BlindingSizePolicy {
 template <typename F> struct ZkWitness;
 template <typename F> struct ZkCommitment;
 
-// =============================================================================
-// ZkConfig<F> — ZK WHIR 协议配置。
+// ============================================================================
+// ZkConfig<F> — ZK WHIR 协议配置
 //
 // 包含两个内部 WHIR 配置:
-//   blinded_commitment — 对 f_hat = f + mask 的 WHIR 承诺/证明
-//   blinding_commitment — 对盲化多项式本身的 WHIR 承诺/证明
+//   blinded_commitment  — 用于 f_hat = f + mask 的 WHIR
+//   blinding_commitment — 用于盲化多项式本身的 WHIR
 //
 // 域参数:
-//   omega_full() — 全域生成元 (阶 = codeword_length * interleaving_depth)
-//   omega_sub()  — 子域生成元 (阶 = codeword_length)
-//   zeta()       — coset 偏移 = omega_full^codeword_length
-//
-// 关键方法:
-//   from_params(size, params, num_polynomials) — 构造配置
-//   num_witness_variables() — 见证变量数 = log2(blinded_commitment.initial_size)
-//   num_blinding_variables() — 盲化变量数 = log2(blinding_commitment.initial_size) - 1
-//   all_gammas(query_points) — 对每个域内挑战点展开其 coset (共 id 个 gamma)
-// =============================================================================
+//   omega_full() — 完整域生成元（阶 = codeword_length * interleaving_depth）
+//   omega_sub()  — 子域生成元（阶 = codeword_length）
+//   zeta()       — 陪集偏移 = omega_full^codeword_length
+// ============================================================================
 
 template <typename F>
 struct ZkConfig {
@@ -112,17 +90,7 @@ struct ZkConfig {
     WhirConfig blinded_commitment;   // f_hat 的 WHIR 配置
     WhirConfig blinding_commitment;  // 盲化多项式的 WHIR 配置
 
-    // -------------------------------------------------------------------------
-    // from_params(size, params, num_polynomials) — 从协议参数构造。
-    //
-    // 输入:
-    //   size            — 多项式长度 (2 的幂)
-    //   params          — ProtocolParameters
-    //   num_polynomials — 要承诺的多项式数量
-    //
-    // 过程: 先构造 BlindingSizePolicy, 再委托给 from_params_with_policy。
-    // 输出: ZkConfig
-    // -------------------------------------------------------------------------
+    // 从协议参数构造。委托给 from_params_with_policy，自动推导 BlindingSizePolicy
     static ZkConfig from_params(
         std::size_t size, const ::whir::ProtocolParameters& params,
         std::size_t num_polynomials)
@@ -131,61 +99,58 @@ struct ZkConfig {
             BlindingSizePolicy::from_whir_params(params));
     }
 
-    // 带显式策略的构造 (实现见文件末尾)。
+    // 使用显式策略构造（实现位于文件末尾）
     static ZkConfig from_params_with_policy(
         std::size_t size, const ::whir::ProtocolParameters& params,
         std::size_t num_polynomials, const BlindingSizePolicy& policy);
 
     // ---- 尺寸参数 ----
 
-    // 见证变量数 = log2(blinded_commitment 的向量长度)
+    // witness 变量数 = log2(blinded_commitment.initial_size)
     std::size_t num_witness_variables() const {
         return trailing_zeros(blinded_commitment.initial_size());
     }
 
-    // 盲化变量数 = log2(blinding_commitment 的向量长度) - 1
-    // (减 1 是因为盲化向量有 ell+1 个变量, 这里返回 ell)
+    // 盲化变量数 = log2(blinding_commitment.initial_size) - 1
+    // -1 是因为盲化向量的 ell+1 变量结构
     std::size_t num_blinding_variables() const {
         return trailing_zeros(blinding_commitment.initial_size()) - 1;
     }
 
-    // 交错深度 = 每个多项式被切分的块数
+    // 交织深度 = 每个多项式被分割的块数
     std::size_t interleaving_depth() const {
         return blinded_commitment.initial_committer.interleaving_depth;
     }
 
     // ---- 域生成元 ----
 
-    // 全域生成元: 阶 = codeword_length * interleaving_depth
-    // 用于将域内索引映射到 gamma 点
+    // 完整域生成元: 阶 = codeword_length * interleaving_depth
     F omega_full() const {
         std::size_t cw_len = blinded_commitment.initial_committer.codeword_length;
         std::size_t full_domain = cw_len * interleaving_depth();
         auto g = ::whir::algebra::ntt::generator<F>(full_domain);
-        assert(g.has_value() && "full_domain 超出 NTT 引擎支持的域大小");
+        assert(g.has_value() && "full_domain exceeds NTT engine field size");
         return *g;
     }
 
-    // 子域生成元: 阶 = codeword_length (NTT 求值域)
+    // 子域生成元: 阶 = codeword_length（NTT 求值域）
     F omega_sub() const {
         return blinded_commitment.initial_committer.generator();
     }
 
-    // zeta = omega_full^codeword_length (coset 偏移)
+    // zeta = omega_full^codeword_length（陪集偏移）
     F zeta() const {
         std::size_t cw_len = blinded_commitment.initial_committer.codeword_length;
         return omega_full().pow(static_cast<std::uint64_t>(cw_len));
     }
 
-    // omega_sub 的各次幂 [1, ω, ω^2, ..., ω^(cw_len-1)]
+    // [1, omega_sub, omega_sub^2, ..., omega_sub^(cw_len-1)]
     std::vector<F> omega_powers() const {
         std::size_t cw_len = blinded_commitment.initial_committer.codeword_length;
         return ::whir::algebra::geometric_sequence(omega_sub(), cw_len);
     }
 
-    // 在 omega_powers 中查找 alpha_base 的索引。
-    // 输入: alpha_base — 域内挑战点; omega_powers — 子域各次幂
-    // 输出: 索引 (0 ≤ idx < codeword_length)
+    // 在 omega_powers 中查找 alpha_base 的索引
     std::size_t query_index(F alpha_base, std::span<const F> omega_powers) const {
         for (std::size_t i = 0; i < omega_powers.size(); ++i)
             if (omega_powers[i] == alpha_base) return i;
@@ -193,15 +158,11 @@ struct ZkConfig {
         return 0;
     }
 
-    // all_gammas(query_points) — 对每个域内挑战点展开其 coset。
+    // 将每个域内挑战点展开为其陪集（interleaving_depth 个 gamma 点）
     //
-    // 输入: query_points — 域内挑战点列表 (每个在 {ω^i} 中)
-    // 过程: 对每个 alpha:
-    //         idx = query_index(alpha)
-    //         coset_offset = omega_full^idx
-    //         展开为 {coset_offset * zeta^j : j=0..id-1}
-    // 输出: gammas — 所有 gamma 点列表 (长度 = query_points.size() * id)
-    // =============================================================================
+    // 对每个 alpha: idx = query_index(alpha), coset_offset = omega_full^idx,
+    // 然后 {coset_offset * zeta^j : j=0..id-1}
+    // 返回所有 gamma 点（长度 = query_points.size() * interleaving_depth）
     std::vector<F> all_gammas(std::span<const F> query_points) const {
         auto om_powers = omega_powers();
         std::size_t id = interleaving_depth();
@@ -219,19 +180,19 @@ struct ZkConfig {
         return gammas;
     }
 
-    // ---- 协议方法 (实现见 whir_zk_impl.hpp) ----
+    // ---- 协议方法（实现在 whir_zk_impl.hpp） ----
 
-    // commit: 用零知识盲化承诺多项式 (采样盲化, 构造 f_hat, 双重 WHIR 承诺)
+    // ZK 盲化承诺: 采样盲化，构造 f_hat，双重 WHIR 承诺
     template <typename Transcript, typename Rng>
     ZkWitness<F> commit(Transcript& prover_state,
         std::span<const std::span<const F>> polynomials, Rng& rng) const;
 
-    // receive_commitments: 接收 ZK 承诺 (num_polys 个 f_hat + 1 个 blinding)
+    // 接收 ZK 承诺（num_polys 个 f_hat 承诺 + 1 个 blinding 承诺）
     template <typename Transcript>
     ZkCommitment<F> receive_commitments(Transcript& verifier_state,
         std::size_t num_polynomials) const;
 
-    // prove: ZK WHIR 完整证明 (11 步)
+    // ZK WHIR 完整证明（11 步）
     template <typename Transcript, typename Rng>
     ::whir::protocols::whir::FinalClaim<F> prove(
         Transcript& prover_state,
@@ -241,7 +202,7 @@ struct ZkConfig {
         std::span<const F> evaluations,
         Rng& rng) const;
 
-    // verify: ZK WHIR 完整验证 (9 步), 返回 true 表示接受
+    // ZK WHIR 完整验证（9 步）。返回 true 接受
     template <typename Transcript>
     bool verify(
         Transcript& verifier_state,
@@ -250,12 +211,12 @@ struct ZkConfig {
         const ZkCommitment<F>& commitment) const;
 };
 
-// =============================================================================
-// ZkCommitment<F> — ZK 承诺。
+// ============================================================================
+// ZkCommitment<F> — ZK 承诺（验证者端）
 //
-// f_hat: 每个多项式的 f_hat 的 WHIR 承诺列表 (长度 = num_polys)
-// blinding: 盲化多项式的 WHIR 承诺 (单个, 包含所有盲化向量)
-// =============================================================================
+// f_hat:    每个多项式的 WHIR 承诺（长度 = num_polys）
+// blinding: 所有盲化向量的单个 WHIR 承诺
+// ============================================================================
 
 template <typename F>
 struct ZkCommitment {
@@ -263,15 +224,15 @@ struct ZkCommitment {
     ::whir::protocols::whir::Commitment<F> blinding;
 };
 
-// =============================================================================
-// ZkWitness<F> — ZK 见证 (prover 在 commit 后持有)。
+// ============================================================================
+// ZkWitness<F> — ZK witness（证明者在 commit 后持有）
 //
-// f_hat_vectors:    f_hat = f + mask (每个多项式一个)
-// f_hat_witnesses:  f_hat 的 IRS Witness (含编码矩阵 + Merkle 见证 + OOD 求值)
-// blinding_polynomials: 盲化多项式族 (每个多项式一个 BlindingPolynomials)
-// blinding_vectors: 盲化向量的布局 (用于 WHIR 承诺)
-// blinding_witness: 盲化向量的 IRS Witness
-// =============================================================================
+// f_hat_vectors:       f_hat = f + mask（每个多项式一个）
+// f_hat_witnesses:     f_hat 的 IRS Witness（RS 矩阵 + Merkle + OOD）
+// blinding_polynomials: 每个多项式的 BlindingPolynomials
+// blinding_vectors:    盲化向量布局（用于 WHIR 承诺）
+// blinding_witness:    盲化向量的 IRS Witness
+// ============================================================================
 
 template <typename F>
 struct ZkWitness {
@@ -282,26 +243,18 @@ struct ZkWitness {
     ::whir::protocols::irs_commit::Witness<F, F> blinding_witness;
 };
 
-// =============================================================================
-// ZkConfig::from_params_with_policy — 从参数和策略构造完整配置。
+// ============================================================================
+// ZkConfig::from_params_with_policy — 从参数和策略构造完整 ZK 配置
 //
-// 输入:
-//   size            — 多项式长度 (2 的幂)
-//   params          — 协议参数
-//   num_polynomials — 多项式数量
-//   policy          — 盲化大小策略
-//
-// 过程:
-//   1. 构造 blinded_commitment (对原始多项式的 WHIR 配置)
-//   2. 计算需要的盲化变量数 num_blinding_vars:
-//      上界 q_ub = k1*q_delta_1 + k2*q_delta_2 + t1 + t2 + sumcheck_leak
-//      找最小的 num_blinding_vars 使得 2^num_blinding_vars > q_ub
-//   3. 构造 blinding_commitment (对盲化多项式的 WHIR 配置)
+// 流程:
+//   1. 构建 blinded_commitment（原始多项式的 WHIR 配置）
+//   2. 计算所需盲化变量数:
+//      q_ub = k1*q_delta_1 + k2*q_delta_2 + t1 + t2 + sumcheck_leak
+//      找最小 num_blinding_vars 使得 2^num_blinding_vars > q_ub
+//   3. 构建 blinding_commitment（盲化多项式的 WHIR 配置）:
 //      blind_size = 2^num_blinding_vars
 //      batch_size = num_polynomials * (num_witness_vars + 1)
-//
-// 输出: ZkConfig
-// =============================================================================
+// ============================================================================
 
 template <typename F>
 ZkConfig<F> ZkConfig<F>::from_params_with_policy(

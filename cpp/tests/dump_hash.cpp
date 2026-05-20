@@ -33,45 +33,36 @@ int main() {
     Lcg rng(0xAAAAAAAAAAAAAAAAULL);
 
     // 打印哈希值为 64 字符十六进制字符串
-    auto print_hash = [](const char* label, const whir::hash::Hash& h) { //[]表示匿名函数
+    auto print_hash = [](const char* label, const whir::hash::Hash& h) {
         std::printf("  %s ", label);
-        //遍历哈希的每一个字节
-        for (auto byte : h) std::printf("%02x", static_cast<unsigned>(byte));//小写十六进制至少占两位
+        for (auto byte : h) std::printf("%02x", static_cast<unsigned>(byte));
         std::printf("\n");
     };
 
-    
-
-    //高效地生成指定数量n的随机字节
     // 从 LCG 取 n 字节确定性输入 (每次取 u64, 按 LE 拆成 8 字节)
-    auto make_bytes = [&](std::size_t n) { //[&]表示按引用捕获外部变量(rng)
-        //n表示希望生成的随机字节的总数量
+    auto make_bytes = [&](std::size_t n) {
         std::vector<std::uint8_t> v; v.reserve(n);
         while (v.size() < n) {
-            std::uint64_t w = rng.next(); //获得下一个64位(8字节)整数
-            for (int i = 0; i < 8 && v.size() < n; ++i) { //把w拆成8份
-                v.push_back((uint8_t)(w & 0xFFu)); //只保留w最右边的8bit
+            std::uint64_t w = rng.next();
+            for (int i = 0; i < 8 && v.size() < n; ++i) {
+                v.push_back((uint8_t)(w & 0xFFu));
                 w >>= 8;
             }
         }
-        return v; //返回一个装满了n个随机字节的动态数组
+        return v;
     };
 
-    //定义一个自动化执行器，只要传入一个具体的哈希引擎和测试参数，就会自动生成测试数据、喂给引擎计算并把结果整齐打印出来
     // 通用测试闭包: 用指定引擎, 生成 size*count 字节随机输入, 批量哈希
     auto run = [&](int ci, const whir::hash::HashEngine& eng,
                    const char* label, std::size_t sz, std::size_t cnt) {
-                    //sz:每一个被切割的数据小块的长度(字节数)
-                    //cnt:需要计算哈希的数据块的数量
-        auto input = make_bytes(sz * cnt); //需要sz*cnt个字节
-        std::vector<whir::hash::Hash> out(cnt);  //创建一个out数组，cnt个空位
+        auto input = make_bytes(sz * cnt);
+        std::vector<whir::hash::Hash> out(cnt);
         eng.hash_many(sz,
-            std::span<const std::uint8_t>{input.data(), input.size()}, //input
+            std::span<const std::uint8_t>{input.data(), input.size()},
             std::span<whir::hash::Hash>{out.data(), out.size()});
-        std::printf("CASE %d %s size=%zu count=%zu\n", ci, label, sz, cnt); //类似输出CASE 1 Blake3-Test size=32 count=3。%zu是专门用来打印std::size_t类型的占位符
+        std::printf("CASE %d %s size=%zu count=%zu\n", ci, label, sz, cnt);
 
         for (std::size_t i = 0; i < out.size(); ++i) {
-            //std::snprintf(b,8,"h%zu",i):把h和当前的序号i拼接起来,放进字符数组b里,8表示允许写入目标字符数组b的最大字节数
             char b[8]; std::snprintf(b, 8, "h%zu", i); print_hash(b, out[i]);
         }
     };

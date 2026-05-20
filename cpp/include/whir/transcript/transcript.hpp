@@ -1,28 +1,29 @@
 #pragma once
 
 // ===========================================================================
-// transcript.hpp — Fiat-Shamir Transcript 包装层
-// 对应 WHIR 中的 src/transcript/mod.rs。
+// transcript.hpp — Fiat-Shamir 转录层 (SHAKE-128 XOF 双工海绵)
 //
-// 用 SHAKE-128 实现 XOF 双工海绵 (对标 spongefish::XOF<Shake128> = StdHash),
-// 确保与 Rust 端字节兼容。
+// 基于 SHAKE-128 双工海绵实现 WHIR 转录协议, 与 Rust spongefish::StdHash
+// 字节级兼容。
 //
-// 海绵模式 (对标 spongefish instantiations/xof.rs):
-//   absorb(data)  — shake128_absorb: 把数据喂入 SHAKE-128 hasher
-//   squeeze(out)  — shake128_xof_clone + shake128_xof_read: clone → finalize_xof → read
-//   ratchet()     — 空操作 (Rust 的 XOF 也同样是 todo!(), WHIR 协议中不调用)
-//
-// DomainSeparator (对标 Rust DomainSeparator):
-//   protocol_id = SHA3-512(cbor(config))     — 64B
-//   session_id  = SHA3-256(cbor(session))    — 32B
+// 海绵操作:
+//   absorb  → shake128_absorb
+//   squeeze → shake128_xof_clone + shake128_xof_read (重建 XOF 读取器)
+//   ratchet → 空操作 (WHIR 协议未使用, 对应 Rust todo!())
 //
 // 核心类型:
-//   DuplexSponge          — 双工海绵抽象接口
-//   Shake128DuplexSponge  — SHAKE-128 实现 (对标 Rust 的 spongefish::StdHash)
-//   DomainSeparator       — 协议/会话/实例三元组 (防跨协议攻击)
-//   ProverState           — 证明者 proof 生成状态
-//   VerifierState         — 验证者 proof 消费状态 (确定性重放)
-//   Empty / U64           — Codec 辅助类型 (对应 Rust codecs.rs)
+//   DuplexSponge            — 双工海绵抽象接口
+//   Shake128DuplexSponge    — SHAKE-128 实现 (spongefish::StdHash)
+//   DomainSeparator         — 协议/会话/实例三元组 (域分离)
+//   ProverState             — Fiat-Shamir 证明者状态 (证明生成)
+//   VerifierState           — Fiat-Shamir 验证者状态 (确定性重放)
+//   Empty / U64             — 编解码辅助类型 (对标 Rust codecs.rs)
+//   CBOR 辅助函数           — DomainSeparator 的最小 CBOR 编码
+//   Narg 序列化             — 证明线格式 (narg_string + hints)
+//
+// DomainSeparator:
+//   protocol_id = SHA3-512(CBOR(config))   — 64 B
+//   session_id  = SHA3-256(CBOR(session))  — 32 B
 // ===========================================================================
 
 #include "../algebra/goldilocks.hpp"
@@ -64,53 +65,43 @@ public:
 // ===========================================================================
 // Shake128DuplexSponge — SHAKE-128 XOF 双工海绵
 //
-// 对标 spongefish::XOF<sha3::Shake128> (即 StdHash).
-// Rust 端代码:
-//   fn absorb(&mut self, input: &[u8]) { self.hasher.update(input); }
-//   fn squeeze(&mut self, output: &mut [u8]) {
-//       self.xof_reader.get_or_insert_with(|| self.hasher.clone().finalize_xof())
-//           .read(output);
-//   }
+// 对应 Rust spongefish::XOF<sha3::Shake128> (StdHash)。
 //
-// C++ 端:
-//   absorb  → shake128_absorb(hasher, input)
-//   squeeze → clone hasher, 然后 shake128_xof_clone + shake128_xof_read
-//   ratchet → 空操作 (Rust 的 XOF ratchet 也标了 todo!())
+// 关键语义: 每次 squeeze 调用克隆 hasher、终结 XOF 并从读取器读取。
+// 因此 squeeze(1); squeeze(1) != squeeze(2) — XOF 读取器每次重建, 与
+// Rust 行为一致。
 //
-// 关键: squeeze 每次调用都会 clone 原始 hasher → finalize → read,
-//       这意味着连续 squeeze(1); squeeze(1) 产生的结果不等同于 squeeze(2)!
-//       这与 Rust 的 XOF 实现完全一致: 每次 squeeze 都会重新构建 xof_reader.
+// absorb:  使 xof_reader 失效, 然后向 hasher 输入数据
+// squeeze: 惰性克隆+终结 hasher 为 xof_reader, 然后读取
+// ratchet: 空操作 (WHIR 协议从不调用)
 // ===========================================================================
 
-//基于SHAKE-128的双工海绵状态机
+// SHAKE-128 双工海绵状态机
 class Shake128DuplexSponge final : public DuplexSponge {
 public:
     Shake128DuplexSponge() { shake128_init(&hasher_); }
 
     void absorb(std::span<const std::uint8_t> input) override {
-        // Rust: self.xof_reader = None; self.hasher.update(input);
-        has_xof_ = false; //一旦有新数据,has_xof_就失效
+        // 使 xof_reader 失效, 然后向 hasher 输入数据
+        has_xof_ = false;
         if (!input.empty())
             shake128_absorb(&hasher_, input.data(), input.size());
     }
 
     void squeeze(std::span<std::uint8_t> output) override {
         if (output.empty()) return;
-        // Rust: self.xof_reader.get_or_insert_with(|| self.hasher.clone().finalize_xof())
-        // 首次 squeeze 时 clone hasher → finalize_xof; 后续 squeeze 复用同一 reader。
-        //如果has_xof_为false(吸收完后第一次挤出)
+        // 首次 squeeze 时克隆 hasher → finalize_xof; 后续 squeeze 复用读取器
         if (!has_xof_) {
-            xof_reader_ = shake128_xof_clone(&hasher_); //clone一份hasher_成xof_reader_
+            xof_reader_ = shake128_xof_clone(&hasher_);
             has_xof_ = true;
         }
-        shake128_xof_read(&xof_reader_, output.data(), output.size()); //xof_reader_挤出size大小数据到output
+        shake128_xof_read(&xof_reader_, output.data(), output.size());
     }
 
     void ratchet() override {
-        // Rust 的 XOF ratchet 标了 todo!(), WHIR 协议中不调用。
+        // Rust XOF ratchet 为 todo!(); WHIR 协议从不调用此方法
     }
 
-    //深度拷贝
     std::unique_ptr<DuplexSponge> clone() const override {
         auto c = std::make_unique<Shake128DuplexSponge>();
         c->hasher_ = hasher_;
@@ -119,60 +110,46 @@ public:
         return c;
     }
 
-    //hash工具
+    // 一次性 SHAKE-128 哈希: 吸收输入 → 克隆+终结 XOF → 读取输出
     static void shake128_hash(const std::uint8_t* data, std::size_t len,
                                std::span<std::uint8_t> out) {
         shake128_ctx ctx;
-        shake128_init(&ctx); //初始化
-        shake128_absorb(&ctx, data, len); //吸收
-        shake128_ctx xof = shake128_xof_clone(&ctx); //clone
-        shake128_xof_read(&xof, out.data(), out.size()); //挤出
-    }
-    //
-    static void sha3_256_digest(const std::uint8_t* data, std::size_t len,
-                                 std::array<std::uint8_t, 32>& out) {
-        sha3_256_hash(data, len, out.data()); //输出256位
+        shake128_init(&ctx);
+        shake128_absorb(&ctx, data, len);
+        shake128_ctx xof = shake128_xof_clone(&ctx);
+        shake128_xof_read(&xof, out.data(), out.size());
     }
 
+    // SHA3-256 摘要: 32 字节输出
+    static void sha3_256_digest(const std::uint8_t* data, std::size_t len,
+                                 std::array<std::uint8_t, 32>& out) {
+        sha3_256_hash(data, len, out.data());
+    }
+
+    // SHA3-512 摘要: 64 字节输出
     static void sha3_512_digest(const std::uint8_t* data, std::size_t len,
                                  std::array<std::uint8_t, 64>& out) {
-        sha3_512_hash(data, len, out.data()); //输出512位
+        sha3_512_hash(data, len, out.data());
     }
 
 private:
-    shake128_ctx hasher_;       // SHAKE-128 累积吸收状态
-    shake128_ctx xof_reader_;   // XOF 挤出 reader (clone + finalized)
+    shake128_ctx hasher_;       // SHAKE-128 吸收状态
+    shake128_ctx xof_reader_;   // XOF 挤压读取器 (克隆+终结)
     bool has_xof_ = false;      // xof_reader_ 是否有效
 };
 
 // ===========================================================================
-// 最小 CBOR 编码 — 用于 DomainSeparator 匹配 Rust 的 ciborium::into_writer
+// 最小 CBOR 编码 — 用于 DomainSeparator, 匹配 Rust ciborium 输出
 //
-// CBOR (RFC 7049, Concise Binary Object Representation) 是 IETF 标准化的二进制
-// 序列化格式。Rust 端通过 serde + ciborium 把 config/session 序列化为 CBOR,
-// 然后用 SHA3-512/256 哈希得到 domain separator 的 protocol_id / session_id。
+// CBOR (RFC 7049): 1 字节头部 (主类型 + 附加信息) + 可选长度 + 载荷。
+// 所有整数和长度采用大端序 (RFC 7049 Section 2.1)。
 //
-// C++ 端必须生成完全相同的 CBOR 字节, 否则 protocol_id 不同, 两端的海绵状态
-// 从一开始就分叉, 后续所有 challenge 全部不一致。
-//
-// CBOR 数据结构 = 1 字节头 (高 3 位 major type + 低 5 位附加信息) + 可选长度 + 载荷:
-//   Major 0 (uint):   0x00..0x17 (值 0-23 直接嵌入低 5 位)
-//                     0x18 + u8, 0x19 + u16 BE, 0x1A + u32 BE, 0x1B + u64 BE
-//   Major 2 (bytes):  0x40..0x57 (0-23B), 0x58 + u8, 0x59 + u16 BE
-//   Major 3 (text):   0x60..0x77, 0x78 + u8, 0x79 + u16 BE, 0x7A + u32 BE
-//   Major 4 (array):  0x80..0x97, 0x98 + u8, 0x99 + u16 BE, 0x9A + u32 BE
-//   Major 5 (map):    0xA0..0xB7, 0xB8 + u8, ...
-//
-// 整数和长度一律大端 (RFC 7049 Section 2.1) — 这是常见的错误来源。
-//
-// 注意: Rust 的 ciborium + serde 把 struct 序列化为 CBOR **map** (major 5,
-// 字段名作为 text key), 而非 array (major 4)。这意味着要精确匹配 Rust 输出,
-// 每个 C++ struct 需要手写 cbor_encode 特化 (参照 Rust 端输出的 CBOR 字节)。
-// 本文件只提供了简单类型 (uint/string/array) 的基础编码, 供测试使用。
+// Rust ciborium + serde 将结构体序列化为 CBOR **映射** (主类型 5, 字段名
+// 作为文本键), 而非数组。为逐字节匹配 Rust 输出, 每个 C++ 结构体需要
+// 手写 cbor_encode 特化。本文件提供 uint/string/array/vector 的基础编码器。
 // ===========================================================================
 
-// 写单个 CBOR 无符号整数 (major 0)。v > 23 时需额外长度字节, 大端序。
-// 例: v=100 → 0x18 0x64; v=0xFFFFFFFF00000001 → 0x1B FF FF FF FF 00 00 00 01
+// CBOR 无符号整数 (主类型 0)。v > 23 时需要额外长度字节。
 inline void cbor_write_uint(std::vector<std::uint8_t>& out, std::uint64_t v) {
     if (v <= 23) {
         out.push_back(static_cast<std::uint8_t>(v));
@@ -201,6 +178,7 @@ inline void cbor_write_uint(std::vector<std::uint8_t>& out, std::uint64_t v) {
     }
 }
 
+// CBOR 文本字符串 (主类型 3)
 inline void cbor_write_text(std::vector<std::uint8_t>& out,
                              std::string_view text) {
     std::uint64_t len = text.size();
@@ -223,7 +201,7 @@ inline void cbor_write_text(std::vector<std::uint8_t>& out,
         out.push_back(static_cast<std::uint8_t>(text[i]));
 }
 
-// 辅助: 写 CBOR array 头 (n 个元素, 大端长度)
+// CBOR 数组头部 (n 个元素, 大端长度编码)
 inline void cbor_array_header(std::vector<std::uint8_t>& out, std::size_t n) {
     if (n <= 23) {
         out.push_back(static_cast<std::uint8_t>(0x80 + n));
@@ -242,16 +220,16 @@ inline void cbor_array_header(std::vector<std::uint8_t>& out, std::size_t n) {
     }
 }
 
-// struct 编码为 CBOR array, 字段用各自的特化
+// 结构体 → CBOR 数组 (需按类型特化)
 template <typename T>
 void cbor_encode(const T& value, std::vector<std::uint8_t>& out);
 
-// string_view → CBOR text (major 3)
+// string_view → CBOR 文本 (主类型 3)
 inline void cbor_encode(std::string_view text, std::vector<std::uint8_t>& out) {
     cbor_write_text(out, text);
 }
 
-// 整数 → CBOR uint (major 0)
+// 整数 → CBOR 无符号整数 (主类型 0)
 inline void cbor_encode(std::uint32_t v, std::vector<std::uint8_t>& out) {
     cbor_write_uint(out, v);
 }
@@ -259,14 +237,14 @@ inline void cbor_encode(std::uint64_t v, std::vector<std::uint8_t>& out) {
     cbor_write_uint(out, v);
 }
 
-// array → CBOR array
+// array → CBOR 数组
 template <typename T, std::size_t N>
 void cbor_encode(const std::array<T, N>& arr, std::vector<std::uint8_t>& out) {
     cbor_array_header(out, N);
     for (const auto& e : arr) cbor_encode(e, out);
 }
 
-// vector → CBOR array
+// vector → CBOR 数组
 template <typename T>
 void cbor_encode(const std::vector<T>& vec, std::vector<std::uint8_t>& out) {
     cbor_array_header(out, vec.size());
@@ -274,19 +252,14 @@ void cbor_encode(const std::vector<T>& vec, std::vector<std::uint8_t>& out) {
 }
 
 // ===========================================================================
-// Narg 序列化 — proof 字符串的读写 (proof 序列化格式)
+// Narg 序列化 — 证明线格式 (narg_string + hints)
 //
-// Narg 串行格式是 WHIR 协议 proof 的线格式。每个 ProverState::prover_message 调用
-// 会先吸收 sponge 再追加到 narg_string。verifier 按同序反序列化并吸收 sponge,
-// 从而确定性地重放挑战。
+// 每次 ProverState::prover_message 调用同时吸收海绵并追加到 narg_string。
+// 验证者按相同顺序反序列化, 吸收海绵以确定性重放挑战。
 //
-// 平凡可拷贝类型直接按字节拷贝 (LE 平台字节序, 与 Rust zerocopy 一致)。
-// vector<T> 类型加 4B LE 长度前缀后再放原始数据。
+// 平凡可复制类型: 原始 LE 字节拷贝 (匹配 Rust zerocopy)。
+// vector<T>: 8 字节 LE 长度前缀 (u64, 匹配 arkworks CanonicalSerialize)。
 // ===========================================================================
-
-// 默认: 平凡可拷贝类型 — reinterpret_cast 为字节, 逐字节拷贝到 dst
-
-//把一个T value序列化成字节流
 template <typename T>
 void narg_serialize(const T& value, std::vector<std::uint8_t>& dst) {
     static_assert(std::is_trivially_copyable_v<T>,
@@ -295,7 +268,7 @@ void narg_serialize(const T& value, std::vector<std::uint8_t>& dst) {
     dst.insert(dst.end(), p, p + sizeof(T));
 }
 
-//反序列化,从字节流读出一个T value
+// 从字节跨度反序列化平凡可复制类型 T
 template <typename T>
 bool narg_deserialize(T& value, std::span<const std::uint8_t>& src) {
     static_assert(std::is_trivially_copyable_v<T>,
@@ -306,7 +279,7 @@ bool narg_deserialize(T& value, std::span<const std::uint8_t>& src) {
     return true;
 }
 
-// vector<uint8_t> 特化: 8B LE 长度 (对标 arkworks CanonicalSerialize for Vec<T>)
+// vector<uint8_t> 特化: 8 字节 LE 长度前缀 (对标 arkworks CanonicalSerialize)
 template <>
 inline void narg_serialize<std::vector<std::uint8_t>>(
     const std::vector<std::uint8_t>& v, std::vector<std::uint8_t>& dst) {
@@ -326,7 +299,7 @@ inline bool narg_deserialize<std::vector<std::uint8_t>>(
     return true;
 }
 
-// 通用 vector<T>: 8B LE 长度 (对标 arkworks)
+// 通用 vector<T>: 8 字节 LE 长度前缀 (对标 arkworks)
 template <typename T>
 void narg_serialize(const std::vector<T>& v, std::vector<std::uint8_t>& dst) {
     static_assert(std::is_trivially_copyable_v<T>);
@@ -351,20 +324,14 @@ bool narg_deserialize(std::vector<T>& v, std::span<const std::uint8_t>& src) {
 }
 
 // ===========================================================================
-// Encoding — 值 → 吸收字节 (送入 sponge 之前)
+// 编码 — 值 → 字节 (用于海绵吸收)
 //
-// Fiat-Shamir 变换要求所有吸入海绵的数据先编码为字节。
-// encode_to_bytes 只负责编码 (不含长度前缀), 与 narg_serialize 不同:
-//   - encode_to_bytes: 海绵吸收用, 不存 proof
-//   - narg_serialize:  proof 序列化用, 写入 narg_string / hints
+// encode_to_bytes: 仅用于海绵吸收 (无长度前缀, 不写入证明)。
+// narg_serialize:  用于证明线格式 (带长度前缀的向量)。
 //
-// 两者对基本类型编码相同 (LE 字节), 但 vector 行为不同:
-//   - encode_to_bytes(vector): 逐元素拼接, 无长度前缀
-//   - narg_serialize(vector):  8B LE 长度 (u64, 对标 arkworks) + 原始字节
+// 两者对平凡可复制类型均使用 LE 字节布局。
+// 向量差异: encode_to_bytes 省略长度; narg_serialize 使用 8 字节 LE u64。
 // ===========================================================================
-
-// 默认: 平凡可拷贝类型 → 直接 reinterpret_cast 为字节 (LE 平台字节序)
-//T value编码成字节
 template <typename T>
 void encode_to_bytes(const T& value, std::vector<std::uint8_t>& out) {
     static_assert(std::is_trivially_copyable_v<T>);
@@ -372,7 +339,6 @@ void encode_to_bytes(const T& value, std::vector<std::uint8_t>& out) {
     out.insert(out.end(), p, p + sizeof(T));
 }
 
-//把一个数组编码为字节
 template <typename T, std::size_t N>
 void encode_to_bytes(const std::array<T, N>& arr, std::vector<std::uint8_t>& out) {
     for (const auto& e : arr) encode_to_bytes(e, out);
@@ -394,19 +360,18 @@ inline void encode_to_bytes(const ::whir::hash::Hash& h,
 }
 
 // ===========================================================================
-// Decoding — 海绵挤出的字节 → 类型化的值
+// 解码 — 海绵挤压字节 → 类型化值
 //
-// 对标 Rust spongefish::Decoding<[u8]>:
-//   - 域元素 (Goldilocks 等): 使用 rejection sampling 保证均匀分布。
-//     挤出 (MODULUS_BIT_SIZE/8 + 32) * extension_degree 个字节,
-//     然后调用 from_le_bytes_mod_order() 规约。
-//   - 小类型 (u64, Hash 等): 直接挤出 sizeof(T) 字节做 LE 解码。
+// 对应 Rust spongefish::Decoding<[u8]>:
+//   - 域元素 (Goldilocks 等): 挤压 (8+32)*ext_degree 字节, 然后
+//     from_le_bytes_mod_order() 进行均匀规约。
+//   - 小类型 (u64, Hash): 直接 LE 解码 sizeof(T) 字节。
 // ===========================================================================
 
-// Decoding buffer size — 对标 Rust decoding_field_buffer_size()
-// Goldilocks:     (8 + 32) * 1 = 40B
-// GoldilocksExt2: (8 + 32) * 2 = 80B (40B per component)
-// GoldilocksExt3: (8 + 32) * 3 = 120B
+// 解码缓冲区大小 — 对标 Rust decoding_field_buffer_size()
+// Goldilocks:     (8 + 32) * 1 = 40 B
+// GoldilocksExt2: (8 + 32) * 2 = 80 B
+// GoldilocksExt3: (8 + 32) * 3 = 120 B
 template <typename T>
 constexpr std::size_t decoding_buffer_size() {
     if constexpr (std::is_same_v<T, ::whir::algebra::Goldilocks>) return 40;
@@ -415,31 +380,35 @@ constexpr std::size_t decoding_buffer_size() {
     else return sizeof(T);
 }
 
-// Reduce x modulo p = 2^64 - 2^32 + 1 using Barrett-style reduction.
-// Assumes x < p * 2^8 (fits in 72 bits → __uint128_t).
-inline std::uint64_t reduce_mod_goldilocks(__uint128_t x) {
+// Goldilocks 稀疏模约: x mod p (p = 2^64 - 2^32 + 1)
+// 前提: x < p * 2^8, 表示为 hi:lo，其中 hi < 256。
+inline std::uint64_t reduce_mod_goldilocks_72(std::uint64_t hi, std::uint64_t lo) {
     constexpr std::uint64_t p = 0xFFFFFFFF00000001ULL;
-    while (x >= p) {
-        std::uint64_t q = static_cast<std::uint64_t>(x >> 64);  // ≈ x / 2^64 ≈ x / p
-        __uint128_t qp = static_cast<__uint128_t>(q) * p;
-        if (qp > x) { q--; qp -= p; }
-        x -= qp;
+    constexpr std::uint64_t epsilon = 0xFFFFFFFFULL;
+    std::uint64_t term = hi * epsilon;
+    std::uint64_t sum = lo + term;
+    if (sum < lo) {
+        const std::uint64_t old = sum;
+        sum += epsilon;
+        if (sum < old) sum += epsilon;
     }
-    return static_cast<std::uint64_t>(x);
+    while (sum >= p) sum -= p;
+    return sum;
 }
 
 // from_le_bytes_mod_order: 对标 arkworks from_le_bytes_mod_order
-// 把所有字节当作 LE 大整数, 规约到 [0, p), 不转 Montgomery。
+// 将所有字节视为 LE 大整数, 规约到 [0, p), 不转 Montgomery 域
 inline std::uint64_t from_le_bytes_mod_order(const std::uint8_t* data, std::size_t len) {
-    __uint128_t acc = 0;
+    std::uint64_t acc = 0;
     for (std::size_t i = len; i > 0; --i) {
-        acc = (acc << 8) | data[i - 1];
-        acc = reduce_mod_goldilocks(acc);
+        const std::uint64_t hi = acc >> 56;
+        const std::uint64_t lo = (acc << 8) | data[i - 1];
+        acc = reduce_mod_goldilocks_72(hi, lo);
     }
-    return static_cast<std::uint64_t>(acc);
+    return acc;
 }
 
-//复制data的T字节到v中
+// 从字节跨度解码 sizeof(T) 个 LE 字节到值
 template <typename T>
 T decode_from_bytes(std::span<const std::uint8_t> data) {
     static_assert(std::is_trivially_copyable_v<T>);
@@ -449,9 +418,8 @@ T decode_from_bytes(std::span<const std::uint8_t> data) {
     return v;
 }
 
-// Goldilocks 解码: 40 LE 字节 → from_le_bytes_mod_order → 转 Montgomery
-// 对标 Rust spongefish Decoding<[u8]>: Repr = DecodingFieldBuffer (40B),
-// decode 调用 BasePrimeField::from_le_bytes_mod_order(chunk).
+// Goldilocks 特化: 40 LE 字节 → from_le_bytes_mod_order → Goldilocks::from_u64
+// 对标 Rust spongefish Decoding<[u8]>: Repr = DecodingFieldBuffer (40 B)
 template <>
 inline ::whir::algebra::Goldilocks decode_from_bytes<::whir::algebra::Goldilocks>(
     std::span<const std::uint8_t> data)
@@ -461,6 +429,7 @@ inline ::whir::algebra::Goldilocks decode_from_bytes<::whir::algebra::Goldilocks
     return ::whir::algebra::Goldilocks::from_u64(v);
 }
 
+// GoldilocksExt2 特化: 80 LE 字节 → 两个 Goldilocks 分量
 template <>
 inline ::whir::algebra::GoldilocksExt2 decode_from_bytes<::whir::algebra::GoldilocksExt2>(
     std::span<const std::uint8_t> data)
@@ -471,6 +440,7 @@ inline ::whir::algebra::GoldilocksExt2 decode_from_bytes<::whir::algebra::Goldil
     return ::whir::algebra::GoldilocksExt2{c0, c1};
 }
 
+// GoldilocksExt3 特化: 120 LE 字节 → 三个 Goldilocks 分量
 template <>
 inline ::whir::algebra::GoldilocksExt3 decode_from_bytes<::whir::algebra::GoldilocksExt3>(
     std::span<const std::uint8_t> data)
@@ -483,39 +453,33 @@ inline ::whir::algebra::GoldilocksExt3 decode_from_bytes<::whir::algebra::Goldil
 }
 
 // ===========================================================================
-// Codec 辅助类型 — 对标 Rust src/transcript/codecs.rs
+// 编解码辅助类型 — 对标 Rust src/transcript/codecs.rs
 //
-// spongefish 未给 u64 提供 NargDeserialize (只有 u32 有), 所以 WHIR 在 C++
-// 和 Rust 两端都定义了 U64 包装类型。Empty 对应 Rust 的 () — 空 instance 场景。
+// spongefish 对 u64 没有 NargDeserialize (仅有 u32), 因此 WHIR 在 C++ 和
+// Rust 两侧均定义了 U64 包装器。Empty 对应 Rust 的 ()。
 // ===========================================================================
 
-// Empty — 零字节编码, 用于不需要 instance 的协议实例化
+// Empty — 零字节编码, 用于不需要实例的协议
 struct Empty {};
 inline void encode_to_bytes(const Empty&, std::vector<std::uint8_t>&) {}
 inline void cbor_encode(const Empty&, std::vector<std::uint8_t>& out) {
-    out.push_back(0x80);  // CBOR 空 array, 匹配 Rust serde 对空 struct 的序列化
+    out.push_back(0x80);  // CBOR 空数组, 匹配 Rust serde 对空结构体的序列化
 }
 
-// U64 — 8 字节 LE u64 包装, 对标 spongefish::codecs::U64 / whir::transcript::codecs::U64
-
-// 用于 transcript 中读写 8 字节 LE 整数 (如 PoW nonce、挑战值等)
+// U64 — 8 字节 LE u64 包装器 (对标 spongefish::codecs::U64)
 struct U64 {
     std::uint64_t value = 0;
     U64() = default;
     explicit U64(std::uint64_t v) : value(v) {}
 };
 
-// U64 的海绵编码: 8 字节 LE (与 Rust impl Encoding<[u8]> for U64 一致)
-
-// 按小端序把无符号整数64位转为8字节
+// U64 海绵编码: 8 字节 LE (匹配 Rust impl Encoding<[u8]> for U64)
 inline void encode_to_bytes(const U64& v, std::vector<std::uint8_t>& out) {
     for (int b = 0; b < 8; ++b)
         out.push_back(static_cast<std::uint8_t>((v.value >> (8 * b)) & 0xFFu));
 }
 
-// U64 的挑战解码: 从 sponge 挤出的 8 字节拼成 LE u64
-
-//从小端序把data中的8字节数据拼成64位无符号整数
+// U64 挑战解码: 8 LE 字节 → u64
 template <>
 inline U64 decode_from_bytes<U64>(std::span<const std::uint8_t> data) {
     std::uint64_t v = 0;
@@ -525,34 +489,25 @@ inline U64 decode_from_bytes<U64>(std::span<const std::uint8_t> data) {
 }
 
 // ===========================================================================
-// DomainSeparator — 协议域分隔器 (防跨协议攻击)
+// DomainSeparator — 协议/会话/实例三元组 (域分离)
 //
-// Fiat-Shamir 安全性要求不同协议/会话/实例使用完全独立的 transcript 状态。
-// DomainSeparator 通过三个字段的不同组合保证:
-//   protocol_id (64B) — 协议指纹: SHA3-512(cbor(config))
-//                       不同协议的 config 不同 → protocol_id 不同 → challenge 不同
-//   session_id  (32B) — 会话指纹: SHA3-256(cbor(session_string))
-//                       同一协议的不同运行 → session_id 不同
-//   instance           — 公开输入 (statement): encode_to_bytes 后吸入海绵
-//                       同一会话不同实例 → sponge 状态不同 → challenge 不同
+// Fiat-Shamir 安全性要求每个协议、会话和实例具有独立的转录状态。
+// 吸收顺序必须与 Rust 完全一致:
+//   1. sponge.absorb(protocol_id)              — 64 B
+//   2. sponge.absorb(session_id)               — 32 B
+//   3. sponge.absorb(encode_to_bytes(instance)) — 可变长度
 //
-// 对标 Rust DomainSeparator (src/transcript/mod.rs)。
 // 用法 (链式调用):
 //   auto ds = DomainSeparator::protocol(config)
 //               .session("test_at_line_42")
 //               .absorb_into(sponge, instance);
-//
-// 吸入顺序 (顺序必须与 Rust 端完全一致):
-//   sponge.absorb(protocol_id)   // 64B
-//   sponge.absorb(session_id)    // 32B
-//   sponge.absorb(encode_to_bytes(instance))
 // ===========================================================================
 
 struct DomainSeparator {
-    std::array<std::uint8_t, 64> protocol_id{};  // SHA3-512(cbor(config)) — 64B
-    std::array<std::uint8_t, 32> session_id{};   // SHA3-256(cbor(session)) — 32B
+    std::array<std::uint8_t, 64> protocol_id{};
+    std::array<std::uint8_t, 32> session_id{};
 
-    // 从 C++ 配置对象生成 protocol_id (底层调用 cbor_encode → SHA3-512)
+    // 从 C++ 配置对象派生 protocol_id (cbor_encode → SHA3-512)
     template <typename C>
     static DomainSeparator protocol(const C& config) {
         DomainSeparator ds;
@@ -566,30 +521,30 @@ struct DomainSeparator {
     DomainSeparator session(std::string_view s) const {
         DomainSeparator ds = *this;
         std::vector<std::uint8_t> cbor_buf;
-        cbor_encode(s, cbor_buf);                     // CBOR text 编码
+        cbor_encode(s, cbor_buf);                     // CBOR 文本编码
         sha3_256_hash(cbor_buf.data(), cbor_buf.size(), ds.session_id.data());
         return ds;
     }
 
-    // 把 domain separator 的全部信息吸入海绵
-    // 注意: instance 用 encode_to_bytes (原始字节), 不用 CBOR。
-    //       这是因为 Rust 端 spongefish 的 instance absorb 也用 Encoding<[u8]>。
+    // 将所有域分离字段吸收进海绵
+    // 注意: instance 使用 encode_to_bytes (原始字节), 非 CBOR —
+    // 匹配 Rust spongefish 的 Encoding<[u8]> 实例吸收方式
     template <typename I>
     void absorb_into(DuplexSponge& sponge, const I& instance) const {
-        sponge.absorb(protocol_id);    // 1. 协议标识 (64B)
-        sponge.absorb(session_id);     // 2. 会话标识 (32B)
+        sponge.absorb(protocol_id);
+        sponge.absorb(session_id);
         std::vector<std::uint8_t> buf;
-        encode_to_bytes(instance, buf); //把instance编码成字节放到b字节流buf中
-        sponge.absorb(buf);            // 3. 公开输入 instance (变长)
+        encode_to_bytes(instance, buf);
+        sponge.absorb(buf);
     }
 };
 
-// cbor_encode for DomainSeparator itself (空结构体 → 空 CBOR array)
+// DomainSeparator 的 CBOR 编码 (空结构体 → 空 CBOR 数组)
 inline void cbor_encode(const DomainSeparator&, std::vector<std::uint8_t>& out) {
     out.push_back(0x80);
 }
 
-// 默认 fallback: 对 generic struct 未特化的, 写 CBOR byte string (major 2)
+// 后备: 未特化的平凡可复制类型 → CBOR 字节串 (主类型 2)
 template <typename T>
 void cbor_encode(const T& value, std::vector<std::uint8_t>& out) {
     static_assert(std::is_trivially_copyable_v<T>,
@@ -608,7 +563,7 @@ void cbor_encode(const T& value, std::vector<std::uint8_t>& out) {
     out.insert(out.end(), p, p + sizeof(T));
 }
 
-// struct 需要手动定义 cbor_encode 特化来覆盖上述 fallback:
+// 结构体需手动定义 cbor_encode 特化来覆盖上述后备:
 //   inline void cbor_encode(const MyConfig& v, std::vector<std::uint8_t>& out) {
 //       cbor_array_header(out, 2);
 //       cbor_encode(v.a, out);
@@ -616,72 +571,68 @@ void cbor_encode(const T& value, std::vector<std::uint8_t>& out) {
 //   }
 
 // ===========================================================================
-// ProverState — 证明者 Fiat-Shamir 状态
+// ProverState — Fiat-Shamir 证明者状态
 //
-// 管理三个并行的状态流:
-//   1. sponge_       — 双工海绵 (跟踪交互的哈希链, 决定后续挑战)
-//   2. narg_string_  — proof 字节流 (prover_message 按序追加)
-//   3. hints_        — 带外提示 (如 Merkle 路径, 不吸入海绵, 只序列化)
+// 三条并行流:
+//   1. sponge_       — 双工海绵 (哈希链, 决定挑战)
+//   2. narg_string_  — 证明字节流 (prover_message 追加至此)
+//   3. hints_        — 带外提示 (如 Merkle 路径, 不被吸收)
 //
-// prover_message 的三步操作 (顺序不可改变):
-//   a) encode_to_bytes → 编码为字节
-//   b) sponge_->absorb  → 吸入海绵 (推进 Fiat-Shamir 状态)
-//   c) narg_serialize   → 追加到 proof 字节流 (verifier 按同序读取)
+// prover_message(msg) 三步 (顺序固定):
+//   a) encode_to_bytes → 字节
+//   b) sponge_->absorb  → 推进 Fiat-Shamir 状态
+//   c) narg_serialize   → 追加到证明 (验证者按相同顺序读取)
 //
-// prover_hint 只做序列化 (不吸入海绵):
-//   用途: Merkle 树证明路径等大块数据。如果吸入海绵, verifier 重放时需要
-//        重新计算哈希来验证, 成本翻倍。
+// prover_hint(hint): 仅序列化, 不吸收海绵 (用于 Merkle 路径等大数据)
 //
-// verifier_message 从海绵挤出随机挑战:
-//   调用 squeeze(sizeof(T)) 产生确定性伪随机字节, 解码为 T。
-//   由于 prover 和 verifier 的海绵状态一致, 挤出结果相同 (确定性重放)。
+// verifier_message<T>(): 挤压 → 确定性挑战 (prover 与 verifier 海绵状态
+//   同步, 因此挤压结果一致)
 //
-// Proof 提取 (move-only):
-//   auto proof = std::move(ps).proof();  // 用 && 限定, 消费后 ProverState 失效
+// 证明提取 (仅移动):
+//   auto proof = std::move(ps).proof();
 // ===========================================================================
 
 class ProverState {
 public:
     struct Proof {
-        std::vector<std::uint8_t> narg_string;  // 序列化的 prover messages
+        std::vector<std::uint8_t> narg_string;  // 序列化的 prover 消息
         std::vector<std::uint8_t> hints;         // 带外提示
     };
 
-    //初始化双工海绵
     ProverState() : sponge_(std::make_unique<Shake128DuplexSponge>()) {}
 
-    // 从 DomainSeparator 构造: 吸入 protocol_id || session_id || encode(instance)
+    // 从 DomainSeparator 构造: 吸收 protocol_id || session_id || encode(instance)
     template <typename I>
     static ProverState from_ds(const DomainSeparator& ds, const I& instance) {
         ProverState ps;
-        ds.absorb_into(*ps.sponge_, instance); //把instance吸到海绵里
+        ds.absorb_into(*ps.sponge_, instance);
         return ps;
     }
 
-    // 发送证明者消息: encode → absorb sponge → 追加到 proof
+    // 发送证明者消息: encode → 吸收海绵 → 追加到证明
     template <typename T>
     void prover_message(const T& message) {
         std::vector<std::uint8_t> encoded;
-        encode_to_bytes(message, encoded);    // 1. 编码message成encoded字节流
-        sponge_->absorb(encoded);              // 2. 把encode吸入海绵
-        narg_serialize(message, narg_string_); // 3. 把message序列化后追加到 proof
+        encode_to_bytes(message, encoded);
+        sponge_->absorb(encoded);
+        narg_serialize(message, narg_string_);
     }
 
-    // 发送带外 hint: 仅序列化, 不吸入海绵 (实际协议中用于 Merkle 路径)
+    // 带外提示: 仅序列化, 不吸收 (如 Merkle 路径)
     template <typename T>
     void prover_hint(const T& hint) {
-        narg_serialize(hint, hints_); //把hint序列化后放到hints_
+        narg_serialize(hint, hints_);
     }
 
-    // 吸收公开消息: 吸入海绵, 不写 proof (prover/verifier 都知道的数据)
+    // 吸收公开消息: 仅海绵, 不写入证明
     template <typename T>
     void public_message(const T& message) {
         std::vector<std::uint8_t> encoded;
-        encode_to_bytes(message, encoded); //公开message编码后放到encoded
-        sponge_->absorb(encoded); //海绵吸入encoded
+        encode_to_bytes(message, encoded);
+        sponge_->absorb(encoded);
     }
 
-    // 挤出验证者挑战: sponge.squeeze(decoding_buffer_size<T>()) → decode → T
+    // 挤出验证者挑战: sponge.squeeze(decoding_buffer_size<T>()) → 解码 → T
     template <typename T>
     T verifier_message() {
         constexpr std::size_t buf_sz = decoding_buffer_size<T>();
@@ -698,37 +649,35 @@ public:
         return res;
     }
 
-    // 消费 ProverState, 提取最终的 Proof (move-only, 防止意外复制 32B+ proof)
-    //返回proof字节流和hints
+    // 消费 ProverState, 提取最终 Proof (仅移动)
     Proof proof() && { return {std::move(narg_string_), std::move(hints_)}; }
 
     const std::vector<std::uint8_t>& narg_string() const { return narg_string_; }
     DuplexSponge& sponge() { return *sponge_; }
 
 private:
-    std::unique_ptr<DuplexSponge> sponge_;     // 双工海绵 (SHAKE-128 XOF)
-    std::vector<std::uint8_t> narg_string_;    // proof 字节流
-    std::vector<std::uint8_t> hints_;          // 带外提示
+    std::unique_ptr<DuplexSponge> sponge_;
+    std::vector<std::uint8_t> narg_string_;
+    std::vector<std::uint8_t> hints_;
 };
 
 // ===========================================================================
-// VerifierState — 验证者 Fiat-Shamir 状态 (确定性重放)
+// VerifierState — Fiat-Shamir 验证者状态 (确定性重放)
 //
-// Verifier 不需要随机数 — proof 中包含所有需要的字节。
-// 工作模式: 从 narg_string 按序反序列化 → 吸入 sponge → 挤出挑战,
-// 由于吸入顺序和数据和 prover 一致, sponge 状态完全同步, 挤出结果相同。
+// 验证者无需随机性 — 所有字节来自证明。
+// 模式: 从 narg_string 反序列化 → 吸收海绵 → 挤压挑战。
+// 由于吸收顺序和数据与证明者一致, 海绵状态同步, 挤压结果相同。
 //
-// 与 ProverState 的对称:
+// 与 ProverState 的对称性:
 //   ProverState                       VerifierState
 //   ──────────────────────────────────────────────────
-//   prover_message(msg)               prover_message(out)   [反序]
-//   verifier_message<T>()             verifier_message<T>() [挤出, 状态同]
-//   prover_hint(hint)                 prover_hint(out)      [反序]
+//   prover_message(msg)               prover_message(out)   [反序列化]
+//   verifier_message<T>()             verifier_message<T>() [挤压, 相同状态]
+//   prover_hint(hint)                 prover_hint(out)      [反序列化]
 //   proof() &&                        from_ds(ds, inst, proof)
-//   (自动生成)                        check_eof()           [额外, 防截断]
+//   (自动生成)                        check_eof()           [额外: 防截断]
 //
-// check_eof() 验证 proof 已完全消费 — 如果还有剩余字节说明 proof 被截断或
-// 注入了额外数据, 属于安全漏洞 (malleability attack)。
+// check_eof() 验证证明被完全消费 — 残留字节表示截断或注入 (可延展性攻击)。
 // ===========================================================================
 
 class VerifierState {
@@ -737,26 +686,26 @@ public:
 
     VerifierState() : sponge_(std::make_unique<Shake128DuplexSponge>()) {}
 
-    // 从 DomainSeparator + Proof 构造: 吸入 ds, 用 proof 填充待读缓冲区
+    // 从 DomainSeparator + Proof 构造: 吸收 ds, 将证明加载到读取缓冲区
     template <typename I>
     static VerifierState from_ds(const DomainSeparator& ds, const I& instance,
                                   const Proof& proof) {
         VerifierState vs;
-        ds.absorb_into(*vs.sponge_, instance);    // 吸入 protocol_id + session_id + instance
-        vs.narg_string_ = proof.narg_string;       // 引入prover的nar_string字节proof流
-        vs.hints_ = proof.hints;                   //引入prover的hints
+        ds.absorb_into(*vs.sponge_, instance);
+        vs.narg_string_ = proof.narg_string;
+        vs.hints_ = proof.hints;
         return vs;
     }
 
-    // 反序列化一条 prover 消息: 从 narg_string 读取 → 吸入 sponge
-    // 返回 false 表示字节不足 (proof 损坏或截断)
+    // 反序列化一条证明者消息: 从 narg_string 读取 → 吸收海绵
+    // 字节不足时返回 false (证明损坏或截断)
     template <typename T>
     bool prover_message(T& out) {
-        if (!narg_deserialize(out, narg_string_)) return false; //反序列化失败
+        if (!narg_deserialize(out, narg_string_)) return false;
         std::vector<std::uint8_t> encoded;
-        encode_to_bytes(out, encoded); //out编码成字节流encoded
-        sponge_->absorb(encoded);  // 将encoded吸入海绵, 保持与 prover 状态同步
-        return true; 
+        encode_to_bytes(out, encoded);
+        sponge_->absorb(encoded);
+        return true;
     }
 
     // 批量读取 count 条消息
@@ -768,13 +717,13 @@ public:
         return true;
     }
 
-    // 读取带外 hint (不吸入海绵, 仅反序列化)
+    // 读取带外 hint (不吸收海绵, 仅反序列化)
     template <typename T>
     bool prover_hint(T& out) {
         return narg_deserialize(out, hints_);
     }
 
-    // 吸收公开消息 (和 prover 一致的调用, 保持 sponge 同步)
+    // 吸收公开消息 (与 prover 一致的调用, 保持海绵同步)
     template <typename T>
     void public_message(const T& message) {
         std::vector<std::uint8_t> encoded;
@@ -782,7 +731,7 @@ public:
         sponge_->absorb(encoded);
     }
 
-    // 确定性重放挑战 — sponge 状态和 prover 相同时挤出结果相同
+    // 确定性重放挑战 — 海绵状态与 prover 相同时挤压结果一致
     template <typename T>
     T verifier_message() {
         constexpr std::size_t buf_sz = decoding_buffer_size<T>();
@@ -791,14 +740,15 @@ public:
         return decode_from_bytes<T>(std::span<const std::uint8_t>{buf});
     }
 
+    // 批量挤压 count 个挑战
     template <typename T>
     std::vector<T> verifier_message_vec(std::size_t count) {
         std::vector<T> res(count);
         for (auto& r : res) r = verifier_message<T>();
-        return res; //返回count个数
+        return res;
     }
 
-    // 验证 proof 完整消费 — 防御 proof malleability (截断/注入攻击)
+    // 验证证明被完全消费 — 防御可延展性攻击
     bool check_eof() const {
         return narg_string_.empty() && hints_.empty();
     }
@@ -807,9 +757,8 @@ public:
 
 private:
     std::unique_ptr<DuplexSponge> sponge_;
-    std::span<const std::uint8_t> narg_string_;  // → proof.narg_string (不拥有)
-    std::span<const std::uint8_t> hints_;         // → proof.hints        (不拥有)
+    std::span<const std::uint8_t> narg_string_;  // 借用 proof.narg_string
+    std::span<const std::uint8_t> hints_;         // 借用 proof.hints
 };
 
 } // namespace whir::transcript
-    

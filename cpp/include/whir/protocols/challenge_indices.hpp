@@ -1,19 +1,25 @@
 #pragma once
 
-// 对应 WHIR 中的 src/protocols/challenge_indices.rs 的纯函数核心。
-// transcript 包装 (从 verifier_message 取 entropy 字节) 推迟到 Phase 5b。
+// ============================================================================
+// challenge_indices.hpp — Fiat-Shamir 挑战索引生成
 //
-// 提供:
-//   indices_from_entropy(entropy, num_leaves, count, deduplicate) -> vector<size_t>
+// 从 transcript 熵为 IRS 承诺域内查询生成随机叶子索引。验证者从
+// Fiat-Shamir transcript 挤压随机字节，然后通过拒绝采样（模约减）
+// 映射到 [0, num_leaves) 范围内的索引。
 //
-// 算法 (与 Rust 端 challenge_indices() 内部完全一致):
-//   - count == 0          → 返空
-//   - num_leaves == 1     → dedup ? [0] : count 个 0
-//   - 否则 size_bytes = ceil(log2(num_leaves)/8), entropy 长度 = count*size_bytes
-//   - 每段 size_bytes 字节按 big-endian 解码再 mod num_leaves
-//   - dedup → sort + unique
+// 算法（与 Rust challenge_indices() 一致）:
+//   count == 0        -> 空
+//   num_leaves == 1   -> dedup ? [0] : count 个 0 的副本
+//   其他情况:
+//     size_bytes = ceil(log2(num_leaves) / 8)
+//     熵长度 = count * size_bytes
+//     每段 size_bytes 字节按大端解码，然后 mod num_leaves
+//     若 deduplicate: sort + unique
 //
-// 注意: num_leaves 必须是 2 的幂 (Rust 端 assert), 不是会触发断言。
+// @pre num_leaves 必须是 2 的幂次（已断言）。
+//
+// 对应 Rust 文件: src/protocols/challenge_indices.rs
+// ============================================================================
 
 #include <algorithm>
 #include <cassert>
@@ -26,13 +32,13 @@
 
 namespace whir::protocols::challenge_indices {
 
-//判断一个无符号整数是否是2的幂
+/// 检查 n 是否为 2 的幂次。
 inline bool is_power_of_two(std::size_t n) noexcept {
-    return n != 0 && (n & (n - 1)) == 0; //1000&0111=0
+    return n != 0 && (n & (n - 1)) == 0;
 }
 
-//计算一个以2的幂为底数的底数
-//ceil(log2(n)) for n >= 1, n 是 2 的幂时即 trailing-zeros count。
+/// ceil(log2(n))，其中 n >= 1 且为 2 的幂次。
+/// 等价于二进制表示中尾随零的个数。
 inline std::size_t log2_pow2(std::size_t n) noexcept {
     assert(n >= 1 && (n & (n - 1)) == 0);
     std::size_t k = 0;
@@ -40,51 +46,58 @@ inline std::size_t log2_pow2(std::size_t n) noexcept {
     return k;
 }
 
-//将一段随机字节流转换成一组数值索引列表
+/// 将原始熵字节串转换为叶子索引向量。
+///
+/// 每段 @p size_bytes 字节按大端解码为整数，然后对 @p num_leaves 取模。
+/// 可选去重。
+///
+/// @pre entropy.size() == count * ceil(log2(num_leaves) / 8)
+/// @pre num_leaves 是 2 的幂次
 inline std::vector<std::size_t> indices_from_entropy(
     std::span<const std::uint8_t> entropy,
-    std::size_t num_leaves, //叶子节点个数
-    std::size_t count, //生成索引
-    bool deduplicate) //布尔开关,是否进行去重并进行排序
+    std::size_t num_leaves,
+    std::size_t count,
+    bool deduplicate)
 {
     if (count == 0) return {};
-    assert(is_power_of_two(num_leaves) && "num_leaves must be a power of two"); //必须是2的幂次
+    assert(is_power_of_two(num_leaves) && "num_leaves must be a power of two");
     if (num_leaves == 1) {
-        if (deduplicate) return {0}; //[0]
-        return std::vector<std::size_t>(count, 0); //[0,0,0...]
+        if (deduplicate) return {0};
+        return std::vector<std::size_t>(count, 0);
     }
 
-    //计算每个索引需要多少个字节
-    //假如num_leaves=1024=2^10,需要10个bit,所以size_bytes=17/8=2需要2个字节
+    // 每个索引的字节数: ceil(log2(num_leaves) / 8)
     const std::size_t size_bytes = (log2_pow2(num_leaves) + 7) / 8;
     assert(entropy.size() == count * size_bytes && "entropy length mismatch");
 
     std::vector<std::size_t> indices;
-    indices.reserve(count); 
-    //从字节流中拼装数字并生成索引
+    indices.reserve(count);
+
+    // 逐段按大端解码，然后 mod num_leaves
     for (std::size_t i = 0; i < count; ++i) {
         std::size_t acc = 0;
         for (std::size_t b = 0; b < size_bytes; ++b) {
-            //每次循环从entropy中读取size_bytes个字节,然后通过大端序拼接成一个大整数
             acc = (acc << 8) | static_cast<std::size_t>(entropy[i * size_bytes + b]);
         }
-        indices.push_back(acc % num_leaves); //取余数使随机数到叶子节点总数范围内
+        indices.push_back(acc % num_leaves);
     }
 
-    if (deduplicate) { //如果去重
-        std::sort(indices.begin(), indices.end()); //从小到大排好
-        indices.erase(std::unique(indices.begin(), indices.end()), indices.end());//重复元素移到末尾然后删除
+    if (deduplicate) {
+        std::sort(indices.begin(), indices.end());
+        indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
     }
     return indices;
 }
 
-// transcript 包装: 从 transcript 挤出 entropy 字节, 然后调用 indices_from_entropy。
-//通过Transcript自动生成一段随机字节,然后利用这些字节生成一组"挑战索引"
+/// Transcript 包装器: 从 Fiat-Shamir transcript 挤压熵字节，
+/// 然后通过 indices_from_entropy() 转换为挑战索引。
+///
+/// @tparam Transcript  必须支持 verifier_message<uint8_t>()
 template <typename Transcript>
 std::vector<std::size_t> challenge_indices(
     Transcript& transcript,
     std::size_t num_leaves,
-    std::size_t count, //多少个挑战索引
+    std::size_t count,
     bool deduplicate)
 {
     if (count == 0) return {};
@@ -93,15 +106,16 @@ std::vector<std::size_t> challenge_indices(
         if (deduplicate) return {0};
         return std::vector<std::size_t>(count, 0);
     }
-    //计算每个索引需要多少个字节
+
     const std::size_t size_bytes = (log2_pow2(num_leaves) + 7) / 8;
-    std::size_t total_bytes = count * size_bytes; 
-    std::vector<std::uint8_t> entropy(total_bytes); //开辟一个total_bytes大的空数组entropy
-    // 逐字节挤出 entropy
+    std::size_t total_bytes = count * size_bytes;
+
+    // 逐字节从 transcript 挤压
+    std::vector<std::uint8_t> entropy(total_bytes);
     for (auto& b : entropy)
-        //从transcript从抽取uint8_t赋值给b
-        b = transcript.template verifier_message<std::uint8_t>(); //template表示<>是一个模板而不是大于小于号
-    return indices_from_entropy(entropy, num_leaves, count, deduplicate);//最后生成一组挑战值索引
+        b = transcript.template verifier_message<std::uint8_t>();
+
+    return indices_from_entropy(entropy, num_leaves, count, deduplicate);
 }
 
 } // namespace whir::protocols::challenge_indices

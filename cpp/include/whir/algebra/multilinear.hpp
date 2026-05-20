@@ -1,12 +1,24 @@
 #pragma once
 
-// 对应 WHIR 中的 src/algebra/multilinear.rs。
-//   multilinear_extend            —— 多元线性扩张 f(point), evals 在布尔超立方上给出 2^k 个值
-//   mixed_multilinear_extend      —— 支持把 Source 域的 evals 提升到 Target 域再求值
-//   eval_eq                       —— 按点张成相等多项式, 累加到 accumulator
+// ============================================================================
+// multilinear.hpp — 多线性扩张求值与相等多项式
 //
-// 这里和 Rust 侧对 point.len() ∈ {0, 1, 2, 3, 4} 的五个显式分支保持一致,
-// 这样递归深度和乘加顺序逐字节和 Rust 相同。
+// 布尔超立方上多线性多项式的核心运算:
+//
+//   mixed_multilinear_extend<M>(emb, evals, point)
+//       对由 evals（{0,1}^k 上的取值）定义的 MLE 在任意点处求值。
+//       通过嵌入 M 支持混合域。
+//
+//   multilinear_extend<F>(evals, point)
+//       Identity 域版本的简写。
+//
+//   eval_eq<F>(accumulator, point, scalar)
+//       累加相等多项式: acc[b] += scalar * eq(point, b)。
+//
+// 对应 WHIR Rust: src/algebra/multilinear.rs
+// point.size() ∈ {0,1,2,3,4} 时使用完全展开的插值，
+// 与 Rust 中手工优化的递归深度和乘加顺序完全一致。
+// ============================================================================
 
 #include "embedding.hpp"
 
@@ -17,36 +29,41 @@
 
 namespace whir::algebra {
 
-//多线性拓展求值
-//sumcheck.hpp中mixed_eval接受的是单项式系数
-//而mixed_multilinear_extend接收的是布尔超立方体上的求值f(00),f(01),f(10),f(11)
+// 对多线性扩张在 point 处求值。
+//
+// evals[k] = f(k)，k ∈ {0,1}^n（超立方取值）。
+// 返回 f(point)，point ∈ F^n 为任意点。
+//
+// point.size() <= 4 时使用完全展开的插值，与 Rust 的递归深度
+// 和运算顺序精确匹配。
+// 更高维时回退到递归半分法:
+//   f(point) = f(point[0]=0) + point[0] * (f(point[0]=1) - f(point[0]=0))
 template <typename M>
 typename M::Target mixed_multilinear_extend(
     const M& emb,
-    std::span<const typename M::Source> evals, //多项式在布尔超立方体上的求值数组[f(00),f(01),f(10),f(11)]
-    std::span<const typename M::Target> point //目标多维坐标点(数组长度为n，即变量个数)
+    std::span<const typename M::Source> evals,
+    std::span<const typename M::Target> point
 ) {
     using Src = typename M::Source;
     using Tgt = typename M::Target;
-    assert(evals.size() == (std::size_t{1} << point.size())); 
+    assert(evals.size() == (std::size_t{1} << point.size()));
 
-    //等价于 Rust 的 |a, b, c| embedding.mixed_add(embedding.mixed_mul(c, b - a), a)
+    // 混合域线性插值: a + c * (b - a)
     auto mixed = [&](const Src& a, const Src& b, const Tgt& c) -> Tgt {
-        //对应公式: a+c*(b-a)
         return emb.mixed_add(emb.mixed_mul(c, b - a), a);
     };
 
     switch (point.size()) {
-        case 0: //0个变量(即常数)直接把唯一求指点提升为Target类型返回
+        case 0:
             return emb.map(evals[0]);
-        case 1: //1个变量
-            return mixed(evals[0], evals[1], point[0]); 
-        case 2: { //2个变量
+        case 1:
+            return mixed(evals[0], evals[1], point[0]);
+        case 2: {
             const Tgt a0 = mixed(evals[0], evals[1], point[1]);
             const Tgt a1 = mixed(evals[2], evals[3], point[1]);
             return a0 + (a1 - a0) * point[0];
-        } 
-        case 3: { //3个变量,在4条平行边上做4次插值，折叠成2条，再折叠成一条，最后算出一个点
+        }
+        case 3: {
             const Tgt a00 = mixed(evals[0], evals[1], point[2]);
             const Tgt a01 = mixed(evals[2], evals[3], point[2]);
             const Tgt a10 = mixed(evals[4], evals[5], point[2]);
@@ -72,11 +89,9 @@ typename M::Target mixed_multilinear_extend(
             const Tgt a1  = a10 + (a11 - a10) * point[1];
             return a0 + (a1 - a0) * point[0];
         }
-        //变量个数大于4
         default: {
-            //递归: evals 前一半、后一半, 对应 x=0, x=1;尾部 point 去掉首位。
+            // 递归半分: 将 evals 拆为 x=0 和 x=1 两半。
             const std::size_t half = evals.size() / 2;
-            //f0处理X0=0的那一半超立方体,并且递归处理剩下的坐标点
             const Tgt f0 = mixed_multilinear_extend<M>(
                 emb, evals.subspan(0, half), point.subspan(1));
             const Tgt f1 = mixed_multilinear_extend<M>(
@@ -86,31 +101,35 @@ typename M::Target mixed_multilinear_extend(
     }
 }
 
-template <typename F> //恒等类型
+// Identity 域的 multilinear_extend 简写。
+template <typename F>
 F multilinear_extend(std::span<const F> evals, std::span<const F> point) {
     Identity<F> id;
     return mixed_multilinear_extend<Identity<F>>(id, evals, point);
 }
 
-//计算相等多项式
-//按点张成相等多项式, 累加: acc[i] += scalar * eq(point, bits(i))。
+// 在布尔超立方上累加相等多项式:
+//   accumulator[b] += scalar * eq(point, b)
+//
+// 其中 b 遍历 {0,1}^n，
+//   eq(point, b) = prod_i (point[i] * b_i + (1 - point[i]) * (1 - b_i))
+//
+// 递归半分法: 对 point[0] = x0，
+//   s0 = scalar * (1 - x0)，s1 = scalar * x0
+// 然后对 accumulator 的两半递归。
 template <typename F>
 void eval_eq(std::span<F> accumulator, std::span<const F> point, F scalar) {
-    //accumulator: 累加器数组（长度为2^n,n是变量个数)
-    //point:目标坐标点数组
-    //假设传入的point=[x0,x1]
     assert(accumulator.size() == (std::size_t{1} << point.size()));
     if (point.empty()) {
         accumulator[0] += scalar;
         return;
     }
-    const F x0 = point[0];                //假设为x0
-    const F s1 = scalar * x0;            //X_i = 1 的贡献 ,x0
-    const F s0 = scalar - s1;            //X_i = 0 的贡献 (1-x0)
+    const F x0 = point[0];
+    const F s1 = scalar * x0;
+    const F s0 = scalar - s1;
     const std::size_t half = accumulator.size() / 2;
-    eval_eq<F>(accumulator.subspan(0, half), point.subspan(1), s0);//传入(1-x0),左半边:s1=(1-x0)x1 右半边: s0=(1-x0)(1-x1)
-    eval_eq<F>(accumulator.subspan(half),    point.subspan(1), s1);//传入x0,左半边:s1=x0(1-x1),右半边x0x1
-    //最后accumulator:[ (1-x0)(1-x1),  (1-x0)x1,  x0(1-x1),  x0x1 ]
+    eval_eq<F>(accumulator.subspan(0, half), point.subspan(1), s0);
+    eval_eq<F>(accumulator.subspan(half),    point.subspan(1), s1);
 }
 
 } // namespace whir::algebra

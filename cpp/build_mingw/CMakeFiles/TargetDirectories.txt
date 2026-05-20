@@ -1,4 +1,0 @@
-C:/Users/DELL/Desktop/whir/cpp/build_mingw/CMakeFiles/whir_thirdparty.dir
-C:/Users/DELL/Desktop/whir/cpp/build_mingw/CMakeFiles/whir_cli.dir
-C:/Users/DELL/Desktop/whir/cpp/build_mingw/CMakeFiles/edit_cache.dir
-C:/Users/DELL/Desktop/whir/cpp/build_mingw/CMakeFiles/rebuild_cache.dir

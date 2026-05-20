@@ -1,27 +1,27 @@
 #pragma once
 
-// ===========================================================================
-// matrix_commit.hpp — 矩阵承诺的纯函数层
-// 对应 WHIR 中的 src/protocols/matrix_commit.rs。
+// ============================================================================
+// matrix_commit.hpp — 域元素矩阵承诺（编码 + 逐行哈希）
 //
-// 把域元素矩阵编码为字节, 然后对每行做哈希 — 这是 Merkle 树构建的前置步骤。
+// 将域元素矩阵编码为字节并对每行独立哈希。这是 IRS 承诺协议中
+// Merkle 树构建之前的预处理步骤。
 //
-// WHIR 中的矩阵承诺流程:
-//   matrix → encode_into → bytes → hash_rows → leaves → merkle_tree
+// 流水线:
+//   matrix -> encode_into -> bytes -> hash_rows -> leaves -> merkle_tree
 //
-// 提供:
-//   encoded_size<T>()           — 单元素 LE 编码字节数 (Fp=8, Fp2=16, Fp3=24)
-//   encode_into<T>(vals, out)   — 把域元素数组 LE 编码到字节缓冲
-//   hash_rows(engine, ms, in, out) — 把 bytes 切成 ms 段独立哈希
-//   commit_leaves<T>(engine, m, cols, out) — 编码 + 行哈希一步到位
+// 提供的功能:
+//   encoded_size<T>()             — 每元素 LE 编码大小（8/16/24 字节）
+//   encode_into<T>(vals, out)     — 将域元素编码到字节缓冲区（LE）
+//   hash_rows(engine, ms, in, out) — 将字节按 ms 大小分块，逐块哈希
+//   commit_leaves<T>(engine, m, cols, out) — 一步完成编码 + 逐行哈希
 //
-// 编码格式: 每个域元素按 little-endian u64 编码基域分量。
-//   Goldilocks     = [c0 的 8B LE]
-//   GoldilocksExt2 = [c0 的 8B LE][c1 的 8B LE]
-//   GoldilocksExt3 = [c0 的 8B LE][c1 的 8B LE][c2 的 8B LE]
+// 编码格式（每个基域分量为小端 u64）:
+//   Goldilocks     = [c0: 8B LE]
+//   GoldilocksExt2 = [c0: 8B LE][c1: 8B LE]
+//   GoldilocksExt3 = [c0: 8B LE][c1: 8B LE][c2: 8B LE]
 //
-// 对应 Rust: protocols/matrix_commit.rs + algebra/fields.rs (Encodable trait)
-// ===========================================================================
+// 对应 Rust 文件: src/protocols/matrix_commit.rs + algebra/fields.rs (Encodable)
+// ============================================================================
 
 #include "../algebra/goldilocks.hpp"
 #include "../algebra/goldilocks_ext2.hpp"
@@ -34,20 +34,20 @@
 #include <span>
 #include <vector>
 
-// ---- CUDA GPU 加速 (可选) ----
+// ---- 可选 CUDA GPU 加速 ----
 #ifdef WHIR_CUDA
 #include "../../../cuda/cuda_integration.hpp"
 #endif
 
 namespace whir::protocols::matrix_commit {
 
-// ---- 单元素编码字节数 (编译期常量) ----
+// ---- 每元素编码大小（编译期常量） ----
 
 template <typename T>
 constexpr std::size_t encoded_size() noexcept;
 
 template <>
-constexpr std::size_t encoded_size<::whir::algebra::Goldilocks>() noexcept { return 8; } //p=2^64-2^32+1<2^64所以可以放入一个8字节的无符号整数
+constexpr std::size_t encoded_size<::whir::algebra::Goldilocks>() noexcept { return 8; }
 
 template <>
 constexpr std::size_t encoded_size<::whir::algebra::GoldilocksExt2>() noexcept { return 16; }
@@ -55,17 +55,20 @@ constexpr std::size_t encoded_size<::whir::algebra::GoldilocksExt2>() noexcept {
 template <>
 constexpr std::size_t encoded_size<::whir::algebra::GoldilocksExt3>() noexcept { return 24; }
 
-// ---- u64 LE 写入 ----
-//将一个64位整数(u64)以小端序格式写入到字节数组中
+// ---- u64 小端写入 ----
+
+/// 将 64 位整数按小端序写入 @p out（8 字节）。
 inline void write_u64_le(std::uint64_t v, std::uint8_t* out) noexcept {
     for (int b = 0; b < 8; ++b) {
         out[b] = static_cast<std::uint8_t>((v >> (8 * b)) & 0xFFu);
     }
-    //例如v = 0x0102030405060708->out=[08] [07] [06] [05] [04] [03] [02] [01]
 }
 
-// ---- 逐元素 LE 编码到字节缓冲 ----
-//将一组Goldilocks域元素values编码为字节流out
+// ---- 逐元素 LE 编码到字节缓冲区 ----
+
+/// 将域元素 span 按小端序编码到字节缓冲区。
+///
+/// @pre out.size() == values.size() * encoded_size<T>()
 template <typename T>
 void encode_into(std::span<const T> values, std::span<std::uint8_t> out);
 
@@ -77,9 +80,9 @@ inline void encode_into<::whir::algebra::Goldilocks>(
     constexpr std::size_t per = 8;
     assert(out.size() == values.size() * per);
 
-    // ---- GPU 加速: 大量元素编码卸到 GPU ----
 #ifdef WHIR_CUDA
-    if (values.size() >= whir::cuda::GPU_NTT_THRESHOLD) {
+    if (whir::cuda::gpu_dispatch_enabled() &&
+        values.size() >= whir::cuda::GPU_NTT_THRESHOLD) {
         whir::cuda::gpu_encode_to_bytes(
             reinterpret_cast<const uint64_t*>(values.data()),
             out.data(), values.size());
@@ -87,12 +90,13 @@ inline void encode_into<::whir::algebra::Goldilocks>(
     }
 #endif
 
-    // ---- CPU 路径 (带 OpenMP 可选) ----
 #ifdef _OPENMP
     #pragma omp parallel for
 #endif
-    for (std::size_t i = 0; i < values.size(); ++i)
+    for (std::ptrdiff_t si = 0; si < static_cast<std::ptrdiff_t>(values.size()); ++si) {
+        const std::size_t i = static_cast<std::size_t>(si);
         write_u64_le(values[i].as_canonical_u64(), out.data() + i * per);
+    }
 }
 
 template <>
@@ -105,12 +109,10 @@ inline void encode_into<::whir::algebra::GoldilocksExt2>(
 #ifdef _OPENMP
     #pragma omp parallel for
 #endif
-    for (std::size_t i = 0; i < values.size(); ++i) {
+    for (std::ptrdiff_t si = 0; si < static_cast<std::ptrdiff_t>(values.size()); ++si) {
+        const std::size_t i = static_cast<std::size_t>(si);
         write_u64_le(values[i].c0().as_canonical_u64(), out.data() + i * per + 0);
         write_u64_le(values[i].c1().as_canonical_u64(), out.data() + i * per + 8);
-        //假设values[0]=1 + 2x,c0() = 1 (十六进制 0x01),c1() = 2 (十六进制 0x02)
-        //写入c0,out[0...7]=01 00 00 00 00 00 00 00
-        //写入c1,out[8...15]=02 00 00 00 00 00 00 00
     }
 }
 
@@ -124,22 +126,26 @@ inline void encode_into<::whir::algebra::GoldilocksExt3>(
 #ifdef _OPENMP
     #pragma omp parallel for
 #endif
-    for (std::size_t i = 0; i < values.size(); ++i) {
+    for (std::ptrdiff_t si = 0; si < static_cast<std::ptrdiff_t>(values.size()); ++si) {
+        const std::size_t i = static_cast<std::size_t>(si);
         write_u64_le(values[i].c0().as_canonical_u64(), out.data() + i * per +  0);
         write_u64_le(values[i].c1().as_canonical_u64(), out.data() + i * per +  8);
         write_u64_le(values[i].c2().as_canonical_u64(), out.data() + i * per + 16);
     }
 }
 
-// ---- 行哈希: 把字节缓冲切成 message_size 段分别哈希 ----
+// ---- 逐行哈希: 将字节缓冲区按 message_size 分块，逐块哈希 ----
 
-/// 将 bytes 切成 out.size() 段 (每段 message_size 字节), 每段独立哈希。
-//将一大块连续的字节数据bytes按照指定的行长度拆分,然后批量计算每一行的哈希值
+/// 以 @p message_size 为单位对平坦字节缓冲区进行哈希。
+///
+/// @pre bytes.size() == message_size * out.size()
+/// @param message_size  每行字节数（一个哈希输入）
+/// @param out           输出 span；out[i] = hash(bytes[i*ms .. (i+1)*ms])
 inline void hash_rows(
     const ::whir::hash::HashEngine& engine,
-    std::size_t message_size, //每一行大小
-    std::span<const std::uint8_t> bytes, //原始数据池
-    std::span<::whir::hash::Hash> out) 
+    std::size_t message_size,
+    std::span<const std::uint8_t> bytes,
+    std::span<::whir::hash::Hash> out)
 {
     assert(bytes.size() == message_size * out.size());
     if (message_size == 0) {
@@ -147,44 +153,38 @@ inline void hash_rows(
         return;
     }
     engine.hash_many(message_size, bytes, out);
-    //假设message_size=8,每行8字节
-    //out.size()=3要得到3个哈希值
-    //读取 bytes[0...7]，存入 out[0]。
-    //读取 bytes[8...15]，存入 out[1]。
-    //读取 bytes[16...23]，存入 out[2]。
 }
 
-// ---- 一站式: 编码矩阵 + 行哈希 → 叶子哈希列表 ----
+// ---- 一步完成: 编码矩阵 + 逐行哈希 -> 叶子哈希 ----
 
-/// commit_leaves: 把矩阵 matrix (rows×cols) 按域类型 T 编码后逐行哈希。
-/// matrix 长度必须 == out.size() * num_cols。
-/// num_cols == 0 时每行都是空消息, out 为引擎的 size=0 常量哈希。
-// 把Goldilocks64组成的二维矩阵,转换成一排哈希值。每一个行数据对应一个哈希值
+/// 编码域元素矩阵并对每行哈希。
+///
+/// @tparam T        域元素类型（Goldilocks / Ext2 / Ext3）
+/// @param matrix    平坦行优先数组，长度 == out.size() * num_cols
+/// @param num_cols  每行列数
+/// @param out       输出: out[i] = hash(encode(matrix[i*nc .. (i+1)*nc]))
+///
+/// 当 num_cols == 0 时，每行为空消息哈希。
 template <typename T>
 void commit_leaves(
     const ::whir::hash::HashEngine& engine,
-    std::span<const T> matrix, //本质是一个一维数组
-    std::size_t num_cols, //矩阵列数,一行有多少元素
+    std::span<const T> matrix,
+    std::size_t num_cols,
     std::span<::whir::hash::Hash> out)
 {
     assert(matrix.size() == out.size() * num_cols);
-    const std::size_t per = encoded_size<T>(); //单个元素编码字节大小 Goldilocks64=8,Goldilocks64_Ext2=16
-    const std::size_t message_size = per * num_cols;  // 每行编码后的字节数
+    const std::size_t per = encoded_size<T>();
+    const std::size_t message_size = per * num_cols;
 
     if (message_size == 0) {
         engine.hash_many(0, std::span<const std::uint8_t>{}, out);
         return;
     }
 
-    // 一次性编码整个矩阵, 然后按行切片哈希
-    std::vector<std::uint8_t> buf(matrix.size() * per); 
-    encode_into<T>(matrix, std::span<std::uint8_t>{buf}); //把matrix编码成字节流buf
-    engine.hash_many(message_size, std::span<const std::uint8_t>{buf}, out); //对buf哈希输出到out,每个out[i]的大小是message字节
-    //假设matrix:[A,B,C,D](matrix.size=4),num_col=2,out_size=2(2行)
-    //message_size=16字节,每一行编码占16字节
-    //buf:4*8=32字节大小,encode_into: 把ABCD变成字节填满buf
-    //buf 前 16 字节：[A的字节][B的字节] (第一行) buf 后 16 字节：[C的字节][D的字节] (第二行)送入hash的是16字节,输出是32字节
-    //然后执行hash_many: out[0]=Hash(A+B)=32字节,out[1] = Hash(C + D)=32字节
+    // 将整个矩阵编码到字节缓冲区，然后逐行哈希
+    std::vector<std::uint8_t> buf(matrix.size() * per);
+    encode_into<T>(matrix, std::span<std::uint8_t>{buf});
+    engine.hash_many(message_size, std::span<const std::uint8_t>{buf}, out);
 }
 
 } // namespace whir::protocols::matrix_commit

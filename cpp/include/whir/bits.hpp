@@ -1,11 +1,16 @@
 #pragma once
 
-// 对应 WHIR 中的 src/bits.rs。
-// f64 包装器, 用来表示比特单位的浮点数 (security level / pow_bits 等数据)。
-// 提供 finite 检查 + 全序比较。
+// ============================================================================
+// bits.hpp — 安全参数的位宽包装
 //
-// Rust 端的 Hash / Serialize 实现 C++ 没有对应需要, 这里不引入;
-// 哈希用裸 f64 比对位串, 等价于 Rust Hasher 实现。
+// 用 double 封装位级度量 (security_level, pow_bits), 支持小数位宽。
+// 提供有限值断言和三路比较运算符, 与 Rust f64-based Bits 类型兼容。
+//
+// 设计理由:
+//   使用 double 允许小数位宽 (如 128.5 bits), 构造时断言有限性以尽早拦截 NaN/Inf。
+//
+// 对应 Rust: src/bits.rs
+// ============================================================================
 
 #include <cassert>
 #include <cmath>
@@ -15,36 +20,27 @@
 
 namespace whir {
 
-//一个以Bit为单位表示安全参数的数值包装类型
-//用Bits表示安全强度位数和PoW难度位数，例如Bits(100.0)表示100位安全强度
 class Bits {
 public:
-    constexpr Bits() noexcept : v_(0.0) {} //默认构造
+    constexpr Bits() noexcept : v_(0.0) {}
 
+    // 构造时断言有限性: NaN/Inf 会无声地污染下游安全参数计算 (阈值、折叠因子)
     explicit Bits(double bits) : v_(bits) {
-        assert(std::isfinite(bits) && "Bits requires a finite value"); //检查isfinite是不是一个有限的数字
-    } //显式构造,NaN/Inf会触发aasert 
+        assert(std::isfinite(bits) && "Bits requires a finite value");
+    }
 
-    constexpr double value() const noexcept { return v_; } //取内部值
-    constexpr explicit operator double() const noexcept { return v_; }//重载double
+    constexpr double value() const noexcept { return v_; }
+    constexpr explicit operator double() const noexcept { return v_; }
+    constexpr bool is_zero() const noexcept { return v_ == 0.0; }
 
-    constexpr bool is_zero() const noexcept { return v_ == 0.0; } //安全参数是否为0
-
-    //Rust 端 PartialOrd::partial_cmp + Ord::cmp 都用 partial_cmp().unwrap()。
-    //这里直接用三路比较, 遇到 NaN 会 unordered, 与 Rust unwrap() 行为差一点 (Rust 会 panic)。
-    //实际上构造函数已经禁止 NaN/Inf, 所以三路比较等价于全序。
-    
-    //重载大于、小于和等于
+    // 构造器保证有限性, <=> 运算符良定义 (对标 Rust PartialOrd + Ord)
     friend constexpr auto operator<=>(const Bits& a, const Bits& b) noexcept = default;
-    
-    //重载等于
     friend constexpr bool operator==(const Bits& a, const Bits& b) noexcept = default;
 
-    //重载打印输出
     friend std::ostream& operator<<(std::ostream& os, const Bits& b) {
         return os << b.v_;
     }
-    
+
 private:
     double v_;
 };
