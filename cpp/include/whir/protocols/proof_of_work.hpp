@@ -99,7 +99,10 @@ inline std::uint64_t find_nonce(
 {
     if (threshold == UINT64_MAX) return 0;
 
-    const std::size_t batch = engine.preferred_batch_size();
+    // PoW 会反复哈希 64B 消息。这里使用比 SIMD 宽度更大的批次，
+    // 减少 hash_many 调用次数和 nonce 写入循环的固定开销。
+    const std::size_t simd_batch = std::max<std::size_t>(engine.preferred_batch_size(), 1);
+    const std::size_t batch = std::max<std::size_t>(simd_batch * 256, 256);
 
     // --- OpenMP 并行路径 ---
 #ifdef _OPENMP

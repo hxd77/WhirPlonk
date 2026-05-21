@@ -264,6 +264,7 @@ where
             eprintln!("[PROFILE] prove::round{}_open: {:.1?}", round_index, t.elapsed());
 
             // Collect constraints for this round and RLC them in
+            let t = Instant::now();
             let stir_challenges = new_witness
                 .out_of_domain()
                 .evaluators(round_config.initial_size())
@@ -285,6 +286,11 @@ where
             );
             the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
             debug_assert_eq!(dot(&vector, &covector), the_sum);
+            eprintln!(
+                "[PROFILE] prove::round{}_stir_constraints: {:.1?}",
+                round_index,
+                t.elapsed()
+            );
 
             // Run sumcheck for this round
             let t = Instant::now();

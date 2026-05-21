@@ -117,6 +117,19 @@ public:
         // 快速路径：使用 blake3_hash_many 进行 SIMD 批量哈希。
         if (supports_size(size)) {
             const std::size_t blocks = size / 64;
+            if (count <= 64) {
+                std::array<const std::uint8_t*, 64> ptrs{};
+                for (std::size_t i = 0; i < count; ++i) {
+                    ptrs[i] = input.data() + i * size;
+                }
+                ::blake3_hash_many(
+                    ptrs.data(), count, blocks, BLAKE3_IV.data(), 0,
+                    false, 0, BLAKE3_CHUNK_START, BLAKE3_CHUNK_END_ROOT,
+                    reinterpret_cast<std::uint8_t*>(output.data()));
+                hash_counter().add(output.size());
+                return;
+            }
+
             const std::size_t batch_size = std::max<std::size_t>(::blake3_simd_degree() * 256, 256);
             const std::size_t num_batches = (count + batch_size - 1) / batch_size;
 

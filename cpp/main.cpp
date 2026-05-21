@@ -24,8 +24,13 @@
 #include "whir/hash/hash_counter.hpp"
 #include "whir/hash/sha2_engine.hpp"
 #include "whir/parameters.hpp"
+#include "whir/profiling.hpp"
 #include "whir/protocols/whir/whir.hpp"
 #include "whir/transcript/transcript.hpp"
+
+#if defined(WHIR_CUDA)
+#include "cuda/cuda_integration.hpp"
+#endif
 
 #include <chrono>
 #include <cmath>
@@ -37,7 +42,7 @@
 #include <string_view>
 #include <vector>
 
-using Clock = std::chrono::high_resolution_clock;
+using Clock = std::chrono::steady_clock;
 
 // CLI 参数 — 默认值与 Rust src/bin/main.rs 一致以保证可复现性
 struct Args {
@@ -53,6 +58,9 @@ struct Args {
     std::string fold_optimisation = "ProverHelps";
     std::string field = "Goldilocks3";
     std::string hash = "Blake3";
+    bool profile = false;
+    bool cuda_trace = false;
+    bool cuda_warmup = true;
 };
 
 [[noreturn]] void fail(std::string_view message) {
@@ -75,6 +83,9 @@ void print_help() {
     std::printf("      --fold_type <FOLD_OPTIMISATION>    [default: ProverHelps]\n");
     std::printf("  -f, --field <FIELD>                    [default: Goldilocks3]\n");
     std::printf("      --hash <MERKLE_TREE>               [default: Blake3]\n");
+    std::printf("      --profile                          Emit CSV profiling rows to stderr\n");
+    std::printf("      --cuda-trace                       Emit CUDA fast-path/fallback diagnostics\n");
+    std::printf("      --no-cuda-warmup                   Skip cudaFree(0) warmup before timing\n");
     std::printf("  -h, --help                             Print help\n");
     std::exit(0);
 }
@@ -116,6 +127,12 @@ Args parse_args(int argc, char* argv[]) {
             args.field = take_value(i, argc, argv, arg);
         else if (arg == "--hash")
             args.hash = take_value(i, argc, argv, arg);
+        else if (arg == "--profile")
+            args.profile = true;
+        else if (arg == "--cuda-trace")
+            args.cuda_trace = true;
+        else if (arg == "--no-cuda-warmup")
+            args.cuda_warmup = false;
         else if (arg == "-h" || arg == "--help")
             print_help();
         else {
@@ -306,13 +323,50 @@ void run_pcs(const Args& args) {
     params.hash_id = hash_id_from_name(args.hash);
 
     auto config = whir_ns::Config<M>::from_params(size, params);
+    ::whir::profile::set_csv_enabled(args.profile || ::whir::profile::csv_enabled());
+    ::whir::profile::set_cuda_trace_enabled(args.cuda_trace || ::whir::profile::cuda_trace_enabled());
     print_config(args, params, config);
 
+#if defined(WHIR_CUDA)
+    if (args.cuda_trace) {
+        std::fprintf(stderr,
+            "[CUDA] build macros: WHIR_CUDA=1 WHIR_CUDA_EXPERIMENTAL_NTT=%d\n",
+        #if defined(WHIR_CUDA_EXPERIMENTAL_NTT)
+            1
+        #else
+            0
+        #endif
+        );
+        std::fprintf(stderr,
+            "[CUDA] runtime dispatch enabled=%d threshold=%zu field=%s hash=%s\n",
+            ::whir::cuda::gpu_dispatch_enabled() ? 1 : 0,
+            ::whir::cuda::gpu_ntt_threshold(),
+            args.field.c_str(), args.hash.c_str());
+    }
+    if (args.cuda_warmup) {
+        const auto warmup_t0 = Clock::now();
+        ::whir::cuda::cuda_warmup();
+        const double warmup_ms = std::chrono::duration<double, std::milli>(
+            Clock::now() - warmup_t0).count();
+        ::whir::profile::record("cuda", size, "cuda_warmup", warmup_ms);
+        if (args.cuda_trace) {
+            std::fprintf(stderr, "[CUDA] warmup cudaFree(0): %.3f ms\n", warmup_ms);
+        }
+    }
+#else
+    if (args.cuda_trace) {
+        std::fprintf(stderr, "[CUDA] build macros: WHIR_CUDA=0\n");
+    }
+#endif
+
     // 构造测试多项式：f(x) = x（将索引 i 映射为域元素）
+    auto t_witness0 = Clock::now();
     std::vector<Source> vector(size);
     for (std::size_t i = 0; i < size; ++i) {
         vector[i] = Source::from_u64(static_cast<std::uint64_t>(i));
     }
+    ::whir::profile::record("prover", size, "witness_generation",
+        std::chrono::duration<double, std::milli>(Clock::now() - t_witness0).count());
     std::vector<std::span<const Source>> vec_spans{std::span<const Source>{vector}};
 
     M emb{};
@@ -341,8 +395,10 @@ void run_pcs(const Args& args) {
 
     auto t0 = Clock::now();
     auto ps = tx::ProverState::from_ds(ds, instance);
-    auto witness = config.commit(ps, vec_spans);
+    auto witness = config.commit(ps, vec_spans); //commit截断
     auto t_commit = Clock::now();
+    ::whir::profile::record("prover", size, "commit_total",
+        std::chrono::duration<double, std::milli>(t_commit - t0).count());
 
     std::vector<::whir::protocols::irs_commit::Witness<Source, Target>> whir_wits;
     whir_wits.push_back(std::move(witness));
@@ -352,11 +408,17 @@ void run_pcs(const Args& args) {
         sp2,
         std::span<const ::whir::protocols::irs_commit::Witness<Source, Target>>{whir_wits},
         std::move(prove_linear_forms),
-        std::span<const Target>{evaluations});
+        std::span<const Target>{evaluations}); //prove阶段
     auto proof = std::move(ps).proof();
     auto t_prove = Clock::now();
+    ::whir::profile::record("prover", size, "prove_total",
+        std::chrono::duration<double, std::milli>(t_prove - t_commit).count());
+    ::whir::profile::record("prover", size, "total_prover",
+        std::chrono::duration<double, std::milli>(t_prove - t0).count());
 
     // 重置哈希计数器，仅统计 verify 阶段产生的哈希（排除 prove 阶段）
+    const bool profile_was_enabled = ::whir::profile::csv_enabled();
+    ::whir::profile::set_csv_enabled(false);
     ::whir::hash::hash_counter().reset();
     std::vector<const alg::LinearForm<Target>*> verify_linear_form_refs;
     verify_linear_form_refs.reserve(verify_linear_forms.size());
@@ -375,6 +437,7 @@ void run_pcs(const Args& args) {
         }
     }
     auto tv1 = Clock::now();
+    ::whir::profile::set_csv_enabled(profile_was_enabled);
 
     const double commit_ms = std::chrono::duration<double, std::milli>(t_commit - t0).count();
     const double prove_ms = std::chrono::duration<double, std::milli>(t_prove - t_commit).count();

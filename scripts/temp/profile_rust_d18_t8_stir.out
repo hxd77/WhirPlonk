@@ -1,0 +1,46 @@
+=========================================
+Whir (PCS) 🌪️
+Field: Goldilocks3 and hash: Blake3
+Security level: 128.02 bits using list decoding
+Source field: 64.00 bits, target field: 192.00 bits
+Initial:
+  commit   size 1×262144/16 rate 2⁻1.00 samples 298 in- 1 out-domain
+  sumcheck size 262144 rounds 4 pow 0.00
+Round 0:
+  commit   size 1×16384/16 rate 2⁻4.00 samples 67 in- 1 out-domain
+  pow      0.00 bits
+  sumcheck size 16384 rounds 4 pow 0.00
+Round 1:
+  commit   size 1×1024/16 rate 2⁻7.00 samples 38 in- 1 out-domain
+  pow      0.00 bits
+  sumcheck size 1024 rounds 4 pow 0.00
+Round 2:
+  commit   size 1×64/16 rate 2⁻10.00 samples 26 in- 1 out-domain
+  pow      0.00 bits
+  sumcheck size 64 rounds 4 pow 0.00
+Final:
+  pow      0.00bits
+  sumcheck size 4 rounds 2 pow 0.00
+------------------------------------
+Round by round soundness analysis:
+------------------------------------
+no loss -- initial vector RLC (1 vector)
+188.8 bits -- initial linear-form RLC (10 linear form)
+166.4 bits -- OOD commitment
+137.2 bits -- (x4) prox gaps: 137.2, sumcheck: 186.7, pow: 0.0, list size 2^4.3
+164.4 bits -- OOD sample
+128.0 bits -- query error: 128.0, combination: 175.5, pow: 0.0
+134.7 bits -- (x4) prox gaps: 134.7, sumcheck: 183.7, pow: 0.0, list size 2^7.3
+162.4 bits -- OOD sample
+129.3 bits -- query error: 129.3, combination: 174.6, pow: 0.0
+132.2 bits -- (x4) prox gaps: 132.2, sumcheck: 180.7, pow: 0.0, list size 2^10.3
+160.4 bits -- OOD sample
+130.3 bits -- query error: 130.3, combination: 172.4, pow: 0.0
+129.7 bits -- (x4) prox gaps: 129.7, sumcheck: 177.7, pow: 0.0, list size 2^13.3
+128.2 bits -- query error: 128.2, pow: 0.0
+191.0 bits -- (x2) combination: 191.0, pow: 0.0
+
+Prover time: 12.6ms + 79.5ms = 92.1ms
+Proof size: 171.3 KiB
+Verifier time: 1.6ms
+Average hashes: 3.5k

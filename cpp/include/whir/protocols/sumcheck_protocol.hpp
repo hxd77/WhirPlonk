@@ -34,6 +34,7 @@
 #include "../hash/sha2_engine.hpp"
 #include "../protocols/proof_of_work.hpp"
 #include "../transcript/transcript.hpp"
+#include "../profiling.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -102,7 +103,14 @@ struct Config {
 
         for (std::size_t r = 0; r < num_rounds; ++r) {
             // 计算二次 sumcheck 多项式系数
-            auto [c0, c2] = ::whir::algebra::compute_sumcheck_polynomial<F>(a, b);
+            F c0{};
+            F c2{};
+            {
+                ::whir::profile::ScopedTimer timer("prover", a.size(), "sumcheck_compute");
+                auto coeffs = ::whir::algebra::compute_sumcheck_polynomial<F>(a, b);
+                c0 = coeffs.first;
+                c2 = coeffs.second;
+            }
             // c0 = sum of a[2i]*b[2i], c2 = sum of a[2i+1]*b[2i+1]
             // c1 为推导值: 验证者从 (sum, c0, c2) 重新计算
             F c1 = sum - (c0 + c0) - c2;
@@ -119,8 +127,14 @@ struct Config {
             folding_randomness.push_back(rnd);
 
             // 折叠向量: v'[i] = v[2i] + r * (v[2i+1] - v[2i])
-            ::whir::algebra::fold<F>(a, rnd);
-            ::whir::algebra::fold<F>(b, rnd);
+            {
+                ::whir::profile::ScopedTimer timer("prover", a.size(), "sumcheck_fold_a");
+                ::whir::algebra::fold<F>(a, rnd);
+            }
+            {
+                ::whir::profile::ScopedTimer timer("prover", b.size(), "sumcheck_fold_b");
+                ::whir::algebra::fold<F>(b, rnd);
+            }
 
             // 更新声明的和: sum' = c0 + c1*r + c2*r^2
             sum = (c2 * rnd + c1) * rnd + c0;

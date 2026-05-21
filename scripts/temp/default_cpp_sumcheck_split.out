@@ -1,0 +1,32 @@
+=========================================
+Whir (PCS) 🌪️
+Field: Goldilocks3 and hash: Blake3
+Security level: 128.00 bits using list decoding
+Source field: 64.00 bits, target field: 192.00 bits
+Initial:
+  commit   size 1x1048576/16 rate 2^-1.00 samples 252 in- 1 out-domain
+  sumcheck size 1048576 rounds 4 pow 0.00
+Round 0:
+  commit   size 1x65536/16 rate 2^-4.00 samples 56 in- 1 out-domain
+  pow      19.74 bits
+  sumcheck size 65536 rounds 4 pow 0.00
+Round 1:
+  commit   size 1x4096/16 rate 2^-7.00 samples 32 in- 1 out-domain
+  pow      19.94 bits
+  sumcheck size 4096 rounds 4 pow 0.00
+Round 2:
+  commit   size 1x256/16 rate 2^-10.00 samples 22 in- 1 out-domain
+  pow      18.25 bits
+  sumcheck size 256 rounds 4 pow 2.25
+Round 3:
+  commit   size 1x16/16 rate 2^-13.00 samples 17 in- 1 out-domain
+  pow      19.55 bits
+  sumcheck size 16 rounds 4 pow 4.75
+Final:
+  pow      18.70bits
+  sumcheck size 1 rounds 0 pow 0.00
+
+Prover time: 79.2ms + 336.1ms = 415.3ms
+Proof size: 180.1 KiB
+Verifier time: 1.7ms
+Average hashes: 4.0k

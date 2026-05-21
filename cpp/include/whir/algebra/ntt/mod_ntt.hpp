@@ -17,6 +17,7 @@
 // ============================================================================
 
 #include "cooley_tukey.hpp"
+#include "../../profiling.hpp"
 
 #include <cassert>
 #include <cstddef>
@@ -77,13 +78,16 @@ std::vector<F> ark_ntt(
     // 每个多项式的各块按 codeword_length 间隔排列，前 message_length 个位置
     // 存放系数，其余填零。
     std::vector<F> result(total_size, F::zero());
-    for (std::size_t poly_index = 0; poly_index < coeffs.size(); ++poly_index) {
-        const auto& poly = coeffs[poly_index];
-        for (std::size_t block_index = 0; block_index < interleaving_depth; ++block_index) {
-            const std::size_t dst = poly_index * per_poly_size + block_index * codeword_length;
-            const std::size_t src = block_index * message_length;
-            for (std::size_t i = 0; i < message_length; ++i) {
-                result[dst + i] = poly[src + i];
+    {
+        ::whir::profile::ScopedTimer timer("cpu", total_size, "rs_zero_pad");
+        for (std::size_t poly_index = 0; poly_index < coeffs.size(); ++poly_index) {
+            const auto& poly = coeffs[poly_index];
+            for (std::size_t block_index = 0; block_index < interleaving_depth; ++block_index) {
+                const std::size_t dst = poly_index * per_poly_size + block_index * codeword_length;
+                const std::size_t src = block_index * message_length;
+                for (std::size_t i = 0; i < message_length; ++i) {
+                    result[dst + i] = poly[src + i];
+                }
             }
         }
     }
@@ -96,11 +100,17 @@ std::vector<F> ark_ntt(
         return result;
     }
 
-    engine.ntt_batch(std::span<F>{result}, codeword_length);
+    {
+        ::whir::profile::ScopedTimer timer("cpu", total_size, "cpu_ntt");
+        engine.ntt_batch(std::span<F>{result}, codeword_length);
+    }
 
     // 步骤 3：转置为行主序（求值点主序）布局。
     // 转置后，第 i 行包含所有多项式在第 i 个求值点处的取值。
-    transpose<F>(std::span<F>{result}, rows_before_transpose, codeword_length);
+    {
+        ::whir::profile::ScopedTimer timer("cpu", total_size, "rs_transpose");
+        transpose<F>(std::span<F>{result}, rows_before_transpose, codeword_length);
+    }
     return result;
 }
 

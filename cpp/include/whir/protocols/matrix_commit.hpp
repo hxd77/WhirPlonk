@@ -27,6 +27,7 @@
 #include "../algebra/goldilocks_ext2.hpp"
 #include "../algebra/goldilocks_ext3.hpp"
 #include "../hash/hash_engine.hpp"
+#include "../profiling.hpp"
 
 #include <cassert>
 #include <cstddef>
@@ -183,8 +184,14 @@ void commit_leaves(
 
     // 将整个矩阵编码到字节缓冲区，然后逐行哈希
     std::vector<std::uint8_t> buf(matrix.size() * per);
-    encode_into<T>(matrix, std::span<std::uint8_t>{buf});
-    engine.hash_many(message_size, std::span<const std::uint8_t>{buf}, out);
+    {
+        ::whir::profile::ScopedTimer timer("cpu", matrix.size(), "merkle_leaf_encode");
+        encode_into<T>(matrix, std::span<std::uint8_t>{buf});
+    }
+    {
+        ::whir::profile::ScopedTimer timer("cpu", out.size(), "merkle_leaf_hash");
+        engine.hash_many(message_size, std::span<const std::uint8_t>{buf}, out);
+    }
 }
 
 } // namespace whir::protocols::matrix_commit

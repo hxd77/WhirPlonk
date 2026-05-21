@@ -30,6 +30,7 @@
 
 #include "../engines.hpp"
 #include "../hash/hash_engine.hpp"
+#include "../profiling.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -121,23 +122,26 @@ Witness build_tree(
 
     // 自底向上: 将每对子节点哈希为一个父节点。
     // config.layers 是根到叶的顺序；反向迭代（最深的层优先）。
-    for (auto it = config.layers.rbegin(); it != config.layers.rend(); ++it) {
-        const auto& layer = *it;
-        const std::size_t curr_len = prev_len / 2;
-        const auto& engine = engine_lookup(layer.hash_id);
+    {
+        ::whir::profile::ScopedTimer timer("cpu", config.num_leaves, "merkle_internal_hash");
+        for (auto it = config.layers.rbegin(); it != config.layers.rend(); ++it) {
+            const auto& layer = *it;
+            const std::size_t curr_len = prev_len / 2;
+            const auto& engine = engine_lookup(layer.hash_id);
 
-        // 将子层视为平坦字节跨度；每对 32B 哈希组成一个 64B 输入块，
-        // 哈希后得到一个 32B 父节点。
-        std::span<const std::uint8_t> input{
-            reinterpret_cast<const std::uint8_t*>(w.nodes.data() + prev_off),
-            prev_len * sizeof(::whir::hash::Hash)};
+            // 将子层视为平坦字节跨度；每对 32B 哈希组成一个 64B 输入块，
+            // 哈希后得到一个 32B 父节点。
+            std::span<const std::uint8_t> input{
+                reinterpret_cast<const std::uint8_t*>(w.nodes.data() + prev_off),
+                prev_len * sizeof(::whir::hash::Hash)};
 
-        std::span<::whir::hash::Hash> output{w.nodes.data() + curr_off, curr_len};
-        engine.hash_many(64, input, output);
+            std::span<::whir::hash::Hash> output{w.nodes.data() + curr_off, curr_len};
+            engine.hash_many(64, input, output);
 
-        prev_off = curr_off;
-        prev_len = curr_len;
-        curr_off += curr_len;
+            prev_off = curr_off;
+            prev_len = curr_len;
+            curr_off += curr_len;
+        }
     }
     return w;
 }

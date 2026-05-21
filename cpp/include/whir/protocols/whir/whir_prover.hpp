@@ -15,6 +15,7 @@
 #include "../../algebra/utilities.hpp"
 #include "../../hash/blake3_engine.hpp"
 #include "../../hash/sha2_engine.hpp"
+#include "../../profiling.hpp"
 #include "../../utils.hpp"
 
 #include <cassert>
@@ -91,6 +92,7 @@ FinalClaim<typename M::Target> Config<M>::prove(
     std::vector<::whir::algebra::UnivariateEvaluation<F>> oods_evals;
     std::vector<F> oods_matrix;
     {
+        ::whir::profile::ScopedTimer timer("prover", initial_size(), "prove_ood_completion");
         std::size_t vector_offset = 0;
         for (const auto& witness : witnesses) {
             auto w_evals = witness.out_of_domain.evaluators(initial_size());
@@ -129,9 +131,13 @@ FinalClaim<typename M::Target> Config<M>::prove(
     auto vector_rlc_coeffs = geometric_challenge<F>(prover_state, num_vectors);
     assert(vector_rlc_coeffs[0] == F::one());
 
-    std::vector<F> vector = ::whir::algebra::lift<M>(*embedding(), vectors_span[0]);
-    for (std::size_t i = 1; i < num_vectors; ++i)
-        ::whir::algebra::mixed_scalar_mul_add<M>(*embedding(), vector, vector_rlc_coeffs[i], vectors_span[i]);
+    std::vector<F> vector;
+    {
+        ::whir::profile::ScopedTimer timer("prover", initial_size(), "vector_rlc");
+        vector = ::whir::algebra::lift<M>(*embedding(), vectors_span[0]);
+        for (std::size_t i = 1; i < num_vectors; ++i)
+            ::whir::algebra::mixed_scalar_mul_add<M>(*embedding(), vector, vector_rlc_coeffs[i], vectors_span[i]);
+    }
 
     // =========================================================================
     // 步骤 3: 约束 RLC
@@ -199,9 +205,11 @@ FinalClaim<typename M::Target> Config<M>::prove(
     bool is_first_round = true;
 
     if (has_constraints) {
+        ::whir::profile::ScopedTimer timer("prover", initial_size(), "initial_sumcheck");
         auto fr = initial_sumcheck.prove(prover_state, vector, covector, the_sum);
         evaluation_point = std::move(fr.coords);
     } else {
+        ::whir::profile::ScopedTimer timer("prover", initial_size(), "initial_fold_without_sumcheck");
         auto fr = prover_state.template verifier_message_vec<F>(initial_sumcheck.num_rounds);
         initial_skip_pow.prove(prover_state, pow_engine_lookup);
         for (auto& f : fr) ::whir::algebra::fold<F>(vector, f);
@@ -241,10 +249,17 @@ FinalClaim<typename M::Target> Config<M>::prove(
         // --- 6a. IRS 承诺当前折叠向量 ---
         std::span<const F> vec_single{vector};
         std::vector<std::span<const F>> single_span{vec_single};
-        auto new_witness = rc.irs_committer.commit(prover_state, single_span);
+        irs_commit::Witness<F, F> new_witness;
+        {
+            ::whir::profile::ScopedTimer timer("prover", rc.irs_committer.size(), "round_commit");
+            new_witness = rc.irs_committer.commit(prover_state, single_span);
+        }
 
         // --- 6b. PoW ---
-        rc.pow.prove(prover_state, pow_engine_lookup);
+        {
+            ::whir::profile::ScopedTimer timer("prover", rc.sumcheck.initial_size, "round_pow");
+            rc.pow.prove(prover_state, pow_engine_lookup);
+        }
 
         // --- 6c. 开启前一轮 witness ---
         irs_commit::Evaluations<F> in_domain;
@@ -253,6 +268,7 @@ FinalClaim<typename M::Target> Config<M>::prove(
             std::vector<const irs_commit::Witness<Source, Target>*> wptrs;
             wptrs.reserve(witnesses.size());
             for (const auto& w : witnesses) wptrs.push_back(&w);
+            ::whir::profile::ScopedTimer timer("prover", initial_committer.codeword_length, "opening");
             auto in_domain_src = initial_committer.open(prover_state, wptrs);
             in_domain = in_domain_src.template lift<M>(*embedding());
             is_first_round = false;
@@ -260,36 +276,72 @@ FinalClaim<typename M::Target> Config<M>::prove(
             // 后续: 开启前一轮的单个 witness
             auto& prev_rc = round_configs[round_idx - 1];
             std::vector<const irs_commit::Witness<F, F>*> wptrs{prev_round_witness};
+            ::whir::profile::ScopedTimer timer("prover", prev_rc.irs_committer.codeword_length, "opening");
             in_domain = prev_rc.irs_committer.open(prover_state, wptrs);
         }
 
         // --- 6d. 收集 STIR 约束 ---
-        // 新 witness 的 OOD 求值器 + 开启操作的域内求值器
-        auto stir_challenges = new_witness.out_of_domain.evaluators(rc.sumcheck.initial_size);
-        auto in_domain_evals = in_domain.evaluators(rc.sumcheck.initial_size);
-        stir_challenges.insert(stir_challenges.end(), in_domain_evals.begin(), in_domain_evals.end());
+        {
+            ::whir::profile::ScopedTimer timer("prover", rc.sumcheck.initial_size, "round_stir_constraints");
+            // 新 witness 的 OOD 求值器 + 开启操作的域内求值器
+            std::vector<::whir::algebra::UnivariateEvaluation<F>> stir_challenges;
+            {
+                ::whir::profile::ScopedTimer sub_timer("prover", rc.sumcheck.initial_size, "round_stir_evaluators");
+                stir_challenges = new_witness.out_of_domain.evaluators(rc.sumcheck.initial_size);
+                auto in_domain_evals = in_domain.evaluators(rc.sumcheck.initial_size);
+                stir_challenges.insert(stir_challenges.end(), in_domain_evals.begin(), in_domain_evals.end());
+            }
 
-        // OOD 值（权重 = [1]）+ 域内值（权重 = tensor_product）
-        // eq_weights 仅使用前一轮折叠随机性（非累积）
-        F one_val = F::one();
-        auto stir_evaluations = new_witness.out_of_domain.values(std::span<const F>{&one_val, 1});
+            // OOD 值（权重 = [1]）+ 域内值（权重 = tensor_product）
+            // eq_weights 仅使用前一轮折叠随机性（非累积）
+            F one_val = F::one();
+            std::vector<F> stir_evaluations;
+            {
+                ::whir::profile::ScopedTimer sub_timer("prover", rc.sumcheck.initial_size, "round_stir_ood_values");
+                stir_evaluations = new_witness.out_of_domain.values(std::span<const F>{&one_val, 1});
+            }
 
-        auto eq_w = last_fr_coords.empty()
-            ? std::vector<F>{F::one()}
-            : ::whir::algebra::MultilinearPoint<F>(last_fr_coords).eq_weights();
-        auto tp = ::whir::algebra::tensor_product<F>(vector_rlc_coeffs, eq_w);
-        auto in_domain_vals = in_domain.values(tp);
-        stir_evaluations.insert(stir_evaluations.end(), in_domain_vals.begin(), in_domain_vals.end());
+            std::vector<F> eq_w;
+            {
+                ::whir::profile::ScopedTimer sub_timer("prover", rc.sumcheck.initial_size, "round_stir_eq_weights");
+                eq_w = last_fr_coords.empty()
+                    ? std::vector<F>{F::one()}
+                    : ::whir::algebra::MultilinearPoint<F>(last_fr_coords).eq_weights();
+            }
+            std::vector<F> tp;
+            {
+                ::whir::profile::ScopedTimer sub_timer("prover", rc.sumcheck.initial_size, "round_stir_tensor_product");
+                tp = ::whir::algebra::tensor_product<F>(vector_rlc_coeffs, eq_w);
+            }
+            {
+                ::whir::profile::ScopedTimer sub_timer("prover", rc.sumcheck.initial_size, "round_stir_in_domain_values");
+                auto in_domain_vals = in_domain.values(tp);
+                stir_evaluations.insert(stir_evaluations.end(), in_domain_vals.begin(), in_domain_vals.end());
+            }
 
-        // STIR RLC: 对所有 STIR 约束做随机线性组合
-        auto stir_rlc = geometric_challenge<F>(prover_state, stir_challenges.size());
-        ::whir::algebra::UnivariateEvaluation<F>::accumulate_many(stir_challenges, covector, stir_rlc);
-        the_sum += ::whir::algebra::dot<F>(stir_rlc, stir_evaluations);
+            // STIR RLC: 对所有 STIR 约束做随机线性组合
+            std::vector<F> stir_rlc;
+            {
+                ::whir::profile::ScopedTimer sub_timer("prover", rc.sumcheck.initial_size, "round_stir_rlc");
+                stir_rlc = geometric_challenge<F>(prover_state, stir_challenges.size());
+            }
+            {
+                ::whir::profile::ScopedTimer sub_timer("prover", rc.sumcheck.initial_size, "round_stir_accumulate_many");
+                ::whir::algebra::UnivariateEvaluation<F>::accumulate_many(stir_challenges, covector, stir_rlc);
+            }
+            {
+                ::whir::profile::ScopedTimer sub_timer("prover", rc.sumcheck.initial_size, "round_stir_dot");
+                the_sum += ::whir::algebra::dot<F>(stir_rlc, stir_evaluations);
+            }
+        }
 
         // --- 6e. STIR sumcheck ---
-        auto fr = rc.sumcheck.prove(prover_state, vector, covector, the_sum);
-        evaluation_point.insert(evaluation_point.end(), fr.coords.begin(), fr.coords.end());
-        last_fr_coords = std::move(fr.coords);
+        {
+            ::whir::profile::ScopedTimer timer("prover", rc.sumcheck.initial_size, "round_sumcheck_folding");
+            auto fr = rc.sumcheck.prove(prover_state, vector, covector, the_sum);
+            evaluation_point.insert(evaluation_point.end(), fr.coords.begin(), fr.coords.end());
+            last_fr_coords = std::move(fr.coords);
+        }
 
         // 更新下一轮状态: 单向量，RLC = [1]
         vector_rlc_coeffs = {F::one()};
@@ -313,6 +365,7 @@ FinalClaim<typename M::Target> Config<M>::prove(
     // 步骤 8: 最终 PoW
     // =========================================================================
     {
+        ::whir::profile::ScopedTimer timer("prover", final_sumcheck.initial_size, "final_pow");
         final_pow.prove(prover_state, pow_engine_lookup);
     }
 
@@ -325,10 +378,12 @@ FinalClaim<typename M::Target> Config<M>::prove(
     if (is_first_round) {
         std::vector<const irs_commit::Witness<Source, Target>*> wptrs;
         for (const auto& w : witnesses) wptrs.push_back(&w);
+        ::whir::profile::ScopedTimer timer("prover", initial_committer.codeword_length, "final_opening");
         initial_committer.open(prover_state, wptrs);
     } else if (prev_round_witness) {
         auto& prev_rc = round_configs.back();
         std::vector<const irs_commit::Witness<F, F>*> wptrs{prev_round_witness};
+        ::whir::profile::ScopedTimer timer("prover", prev_rc.irs_committer.codeword_length, "final_opening");
         prev_rc.irs_committer.open(prover_state, wptrs);
     }
 
@@ -338,8 +393,11 @@ FinalClaim<typename M::Target> Config<M>::prove(
     // 在完全折叠的域上验证 <vector, covector> = the_sum
     // 将返回的坐标追加到 evaluation_point
     // =========================================================================
-    auto final_fr = final_sumcheck.prove(prover_state, vector, covector, the_sum);
-    evaluation_point.insert(evaluation_point.end(), final_fr.coords.begin(), final_fr.coords.end());
+    {
+        ::whir::profile::ScopedTimer timer("prover", final_sumcheck.initial_size, "final_sumcheck");
+        auto final_fr = final_sumcheck.prove(prover_state, vector, covector, the_sum);
+        evaluation_point.insert(evaluation_point.end(), final_fr.coords.begin(), final_fr.coords.end());
+    }
 
     return FinalClaim<F>{
         std::move(evaluation_point),

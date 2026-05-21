@@ -1,4 +1,5 @@
 #include "whir/algebra/goldilocks.hpp"
+#include "whir/algebra/goldilocks_ext3.hpp"
 #include "whir/algebra/ntt/cooley_tukey_goldilocks.hpp"
 #include "whir/algebra/ntt/mod_ntt.hpp"
 
@@ -13,6 +14,7 @@
 #endif
 
 using whir::algebra::Goldilocks;
+using whir::algebra::GoldilocksExt3;
 
 namespace {
 
@@ -98,6 +100,71 @@ std::vector<Goldilocks> encode_gpu(const std::vector<std::span<const Goldilocks>
 #endif
 }
 
+std::vector<std::vector<GoldilocksExt3>> make_ext3_coeffs(const Case& c) {
+    Lcg rng(0x435544415f455833ULL ^ static_cast<uint64_t>(c.poly_size) ^
+            (static_cast<uint64_t>(c.codeword_length) << 16) ^
+            (static_cast<uint64_t>(c.interleaving_depth) << 32) ^
+            (static_cast<uint64_t>(c.num_polys) << 48));
+    std::vector<std::vector<GoldilocksExt3>> coeffs(c.num_polys);
+    for (auto& poly : coeffs) {
+        poly.resize(c.poly_size);
+        for (auto& v : poly) {
+            v = GoldilocksExt3{
+                Goldilocks::from_u64(rng.next()),
+                Goldilocks::from_u64(rng.next()),
+                Goldilocks::from_u64(rng.next())};
+        }
+    }
+    return coeffs;
+}
+
+std::vector<std::span<const GoldilocksExt3>> make_ext3_spans(
+    const std::vector<std::vector<GoldilocksExt3>>& coeffs) {
+    std::vector<std::span<const GoldilocksExt3>> spans;
+    spans.reserve(coeffs.size());
+    for (const auto& poly : coeffs) spans.emplace_back(poly);
+    return spans;
+}
+
+std::vector<GoldilocksExt3> encode_ext3_cpu(
+    const std::vector<std::span<const GoldilocksExt3>>& spans,
+    const Case& c) {
+    auto& engine = whir::algebra::ntt::goldilocks_ext3_engine();
+#if defined(WHIR_CUDA) && defined(WHIR_CUDA_EXPERIMENTAL_NTT)
+    const bool old_enabled = whir::cuda::gpu_dispatch_enabled();
+    whir::cuda::set_gpu_dispatch_enabled(false);
+#endif
+    auto out = whir::algebra::ntt::interleaved_rs_encode<GoldilocksExt3>(
+        engine, std::span<const std::span<const GoldilocksExt3>>{spans},
+        c.codeword_length, c.interleaving_depth);
+#if defined(WHIR_CUDA) && defined(WHIR_CUDA_EXPERIMENTAL_NTT)
+    whir::cuda::set_gpu_dispatch_enabled(old_enabled);
+#endif
+    return out;
+}
+
+std::vector<GoldilocksExt3> encode_ext3_gpu(
+    const std::vector<std::span<const GoldilocksExt3>>& spans,
+    const Case& c) {
+#if defined(WHIR_CUDA) && defined(WHIR_CUDA_EXPERIMENTAL_NTT)
+    auto& engine = whir::algebra::ntt::goldilocks_ext3_engine();
+    const bool old_enabled = whir::cuda::gpu_dispatch_enabled();
+    const std::size_t old_threshold = whir::cuda::gpu_ntt_threshold();
+    whir::cuda::set_gpu_dispatch_enabled(true);
+    whir::cuda::set_gpu_ntt_threshold(0);
+    auto out = whir::algebra::ntt::interleaved_rs_encode<GoldilocksExt3>(
+        engine, std::span<const std::span<const GoldilocksExt3>>{spans},
+        c.codeword_length, c.interleaving_depth);
+    whir::cuda::set_gpu_ntt_threshold(old_threshold);
+    whir::cuda::set_gpu_dispatch_enabled(old_enabled);
+    return out;
+#else
+    (void)spans;
+    (void)c;
+    return {};
+#endif
+}
+
 } // namespace
 
 TEST(CudaRsEncode, MatchesCpuForInterleavedEncode) {
@@ -129,4 +196,24 @@ TEST(CudaRsEncode, EmptyInputMatchesCpu) {
     const auto out = whir::algebra::ntt::interleaved_rs_encode<Goldilocks>(
         engine, std::span<const std::span<const Goldilocks>>{spans}, 16, 1);
     EXPECT_TRUE(out.empty());
+}
+
+TEST(CudaRsEncode, Ext3MatchesCpuForInterleavedEncode) {
+    if (!has_cuda_device()) GTEST_SKIP() << "CUDA device unavailable";
+
+    for (const Case c : {
+             Case{64, 256, 1, 1},
+             Case{256, 1024, 4, 2},
+             Case{1024, 4096, 4, 2},
+         }) {
+        const auto coeffs = make_ext3_coeffs(c);
+        const auto spans = make_ext3_spans(coeffs);
+        const auto cpu = encode_ext3_cpu(spans, c);
+        const auto gpu = encode_ext3_gpu(spans, c);
+        ASSERT_EQ(cpu, gpu)
+            << "poly_size=" << c.poly_size
+            << " codeword_length=" << c.codeword_length
+            << " interleaving_depth=" << c.interleaving_depth
+            << " num_polys=" << c.num_polys;
+    }
 }

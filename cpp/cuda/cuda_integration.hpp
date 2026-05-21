@@ -22,7 +22,9 @@
 #ifdef WHIR_CUDA
 
 #include "cuda_ntt.hpp"
+#include "include/whir/profiling.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstdint>
 #include <memory>
@@ -36,6 +38,7 @@ static constexpr std::size_t GPU_NTT_THRESHOLD = 65536;   // 64K 元素
 static constexpr std::size_t GPU_TWIDDLE_THRESHOLD = 4096; // twiddle 计算轻, 阈值低
 
 struct GpuNttTiming {
+    float malloc_ms = 0.0f;
     float h2d_ms = 0.0f;
     float kernel_ms = 0.0f;
     float d2h_ms = 0.0f;
@@ -79,6 +82,10 @@ inline void set_gpu_ntt_threshold(std::size_t threshold) {
 
 inline GpuNttTiming last_ntt_timing() {
     return last_ntt_timing_value();
+}
+
+inline void cuda_warmup() {
+    CUDA_CHECK(cudaFree(nullptr));
 }
 
 inline float elapsed_ms(cudaEvent_t start, cudaEvent_t stop) {
@@ -175,6 +182,9 @@ public:
     std::size_t roots_len() const noexcept { return roots_len_; }
     const uint64_t* roots_host() const noexcept { return roots_host_; }
 
+    void reset_alloc_timing() noexcept { last_alloc_ms_ = 0.0; }
+    double last_alloc_ms() const noexcept { return last_alloc_ms_; }
+
 private:
     GpuPool() = default;
 
@@ -188,10 +198,13 @@ private:
     template <typename T>
     void ensure_cap(CudaPtr<T>& p, std::size_t& cap, std::size_t n) {
         if (n > cap) {
+            const auto t0 = std::chrono::steady_clock::now();
             cap = n;
             T* raw = nullptr;
             CUDA_CHECK(cudaMalloc(&raw, n * sizeof(T)));
             p.reset(raw);
+            last_alloc_ms_ += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
         }
     }
 
@@ -204,6 +217,7 @@ private:
     CudaPtr<uint8_t>  merkle_;
     std::size_t data_cap_ = 0, roots_cap_ = 0, scratch_cap_ = 0, input_cap_ = 0, byte_cap_ = 0, hash_cap_ = 0, merkle_cap_ = 0, roots_len_ = 0;
     const uint64_t* roots_host_ = nullptr;
+    double last_alloc_ms_ = 0.0;
 };
 
 // ===========================================================================
@@ -272,11 +286,13 @@ inline void gpu_ntt_batch(uint64_t* values, const uint64_t* roots,
                           std::size_t total, std::size_t size) {
     (void)roots;
     auto& pool = GpuPool::instance();
+    pool.reset_alloc_timing();
     uint64_t* d_data = pool.data(total);
     uint64_t* d_scratch = pool.temp(total);
     auto& timing = last_ntt_timing_value();
     timing = {};
     timing.used_gpu = true;
+    timing.malloc_ms = static_cast<float>(pool.last_alloc_ms());
     ScopedCudaEvents ev;
 
     CUDA_CHECK(cudaEventRecord(ev.start()));
@@ -299,6 +315,11 @@ inline void gpu_ntt_batch(uint64_t* values, const uint64_t* roots,
     CUDA_CHECK(cudaEventSynchronize(ev.stop()));
     timing.d2h_ms = elapsed_ms(ev.start(), ev.stop());
     timing.total_ms = timing.h2d_ms + timing.kernel_ms + timing.d2h_ms;
+    whir::profile::record("cuda", total, "gpu_malloc", timing.malloc_ms);
+    whir::profile::record("cuda", total, "gpu_h2d", timing.h2d_ms);
+    whir::profile::record("cuda", total, "gpu_kernel", timing.kernel_ms);
+    whir::profile::record("cuda", total, "gpu_d2h", timing.d2h_ms);
+    whir::profile::record("cuda", total, "gpu_total", timing.total_ms + timing.malloc_ms);
 }
 
 /// GPU 批量 NTT 后立即转置: 输入按 blocks×ntt_size 排列,
@@ -308,11 +329,13 @@ inline void gpu_ntt_batch_transpose(uint64_t* values, const uint64_t* roots,
                                     std::size_t rows, std::size_t cols) {
     (void)roots;
     auto& pool = GpuPool::instance();
+    pool.reset_alloc_timing();
     uint64_t* d_data = pool.data(total);
     uint64_t* d_tmp = pool.temp(total);
     auto& timing = last_ntt_timing_value();
     timing = {};
     timing.used_gpu = true;
+    timing.malloc_ms = static_cast<float>(pool.last_alloc_ms());
     ScopedCudaEvents ev;
 
     CUDA_CHECK(cudaEventRecord(ev.start()));
@@ -337,6 +360,11 @@ inline void gpu_ntt_batch_transpose(uint64_t* values, const uint64_t* roots,
     CUDA_CHECK(cudaEventSynchronize(ev.stop()));
     timing.d2h_ms = elapsed_ms(ev.start(), ev.stop());
     timing.total_ms = timing.h2d_ms + timing.kernel_ms + timing.d2h_ms;
+    whir::profile::record("cuda", total, "gpu_malloc", timing.malloc_ms);
+    whir::profile::record("cuda", total, "gpu_h2d", timing.h2d_ms);
+    whir::profile::record("cuda", total, "gpu_kernel", timing.kernel_ms);
+    whir::profile::record("cuda", total, "gpu_d2h", timing.d2h_ms);
+    whir::profile::record("cuda", total, "gpu_total", timing.total_ms + timing.malloc_ms);
 }
 
 /// GPU Reed-Solomon 编码: 紧凑系数上传 → GPU 零填充/打包 → 批量 NTT → 最终转置.
@@ -346,6 +374,7 @@ inline void gpu_interleaved_rs_encode(const uint64_t* coeffs, uint64_t* out,
                                       std::size_t codeword_length,
                                       std::size_t interleaving_depth) {
     auto& pool = GpuPool::instance();
+    pool.reset_alloc_timing();
     const std::size_t coeff_total = num_polys * poly_size;
     const std::size_t rows = num_polys * interleaving_depth;
     const std::size_t total = rows * codeword_length;
@@ -355,6 +384,7 @@ inline void gpu_interleaved_rs_encode(const uint64_t* coeffs, uint64_t* out,
     auto& timing = last_ntt_timing_value();
     timing = {};
     timing.used_gpu = true;
+    timing.malloc_ms = static_cast<float>(pool.last_alloc_ms());
     ScopedCudaEvents ev;
 
     CUDA_CHECK(cudaEventRecord(ev.start()));
@@ -386,6 +416,11 @@ inline void gpu_interleaved_rs_encode(const uint64_t* coeffs, uint64_t* out,
     CUDA_CHECK(cudaEventSynchronize(ev.stop()));
     timing.d2h_ms = elapsed_ms(ev.start(), ev.stop());
     timing.total_ms = timing.h2d_ms + timing.kernel_ms + timing.d2h_ms;
+    whir::profile::record("cuda", total, "gpu_malloc", timing.malloc_ms);
+    whir::profile::record("cuda", total, "gpu_h2d", timing.h2d_ms);
+    whir::profile::record("cuda", total, "gpu_kernel", timing.kernel_ms);
+    whir::profile::record("cuda", total, "gpu_d2h", timing.d2h_ms);
+    whir::profile::record("cuda", total, "gpu_total", timing.total_ms + timing.malloc_ms);
 }
 
 /// GPU Reed-Solomon 编码并直接输出 Goldilocks LE 字节.

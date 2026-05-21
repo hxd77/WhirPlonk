@@ -78,6 +78,13 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+message(STATUS "Generator: ${CMAKE_GENERATOR}")
+if(CMAKE_CONFIGURATION_TYPES)
+    message(STATUS "Multi-config build types: ${CMAKE_CONFIGURATION_TYPES}")
+else()
+    message(STATUS "Single-config build type: ${CMAKE_BUILD_TYPE}")
+endif()
+
 
 # ----------------------------------------------------------------------------
 # C / C++ 标准设置
@@ -171,6 +178,10 @@ option(USE_CUDA "Alias for WHIR_CUDA; enables CUDA GPU acceleration" OFF)
 option(WHIR_CUDA "Enable CUDA GPU acceleration" ${USE_CUDA})
 option(WHIR_CUDA_EXPERIMENTAL_NTT "Enable CUDA dispatch for Goldilocks NTT/RS encoding" ON)
 
+if(USE_CUDA AND NOT WHIR_CUDA)
+    set(WHIR_CUDA ON CACHE BOOL "Enable CUDA GPU acceleration" FORCE)
+endif()
+
 if(WHIR_CUDA)
     # 当 WHIR_CUDA=ON 时，才启用 CUDA 语言。
     # 如果 nvcc 或 CUDA Toolkit 配置有问题，通常会在这里报错。
@@ -221,6 +232,7 @@ if(WHIR_CUDA)
     endif()
 
     message(STATUS "CUDA enabled (GPU NTT + encoding, arch=sm_${CMAKE_CUDA_ARCHITECTURES})")
+    message(STATUS "CUDA experimental NTT dispatch: ${WHIR_CUDA_EXPERIMENTAL_NTT}")
 else()
     message(STATUS "CUDA disabled — CPU-only build")
 endif()

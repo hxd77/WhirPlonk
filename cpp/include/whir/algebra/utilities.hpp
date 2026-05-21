@@ -17,6 +17,7 @@
 
 #include "embedding.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -29,6 +30,46 @@
 #endif
 
 namespace whir::algebra {
+
+template <typename F>
+F geometric_mul_step(const F& value, const F& point) noexcept {
+    return value * point;
+}
+
+inline GoldilocksExt2 geometric_mul_step(const GoldilocksExt2& value, const GoldilocksExt2& point) noexcept {
+    if (point.c1().is_zero()) {
+        const Goldilocks scalar = point.c0();
+        return {value.c0() * scalar, value.c1() * scalar};
+    }
+    return value * point;
+}
+
+inline GoldilocksExt3 geometric_mul_step(const GoldilocksExt3& value, const GoldilocksExt3& point) noexcept {
+    if (point.c1().is_zero() && point.c2().is_zero()) {
+        const Goldilocks scalar = point.c0();
+        return {value.c0() * scalar, value.c1() * scalar, value.c2() * scalar};
+    }
+    return value * point;
+}
+
+template <typename F>
+F geometric_pow_step(const F& point, std::uint64_t exp) noexcept {
+    return point.pow(exp);
+}
+
+inline GoldilocksExt2 geometric_pow_step(const GoldilocksExt2& point, std::uint64_t exp) noexcept {
+    if (point.c1().is_zero()) {
+        return GoldilocksExt2::from_base(point.c0().pow(exp));
+    }
+    return point.pow(exp);
+}
+
+inline GoldilocksExt3 geometric_pow_step(const GoldilocksExt3& point, std::uint64_t exp) noexcept {
+    if (point.c1().is_zero() && point.c2().is_zero()) {
+        return GoldilocksExt3::from_base(point.c0().pow(exp));
+    }
+    return point.pow(exp);
+}
 
 // 返回 (1, base, base^2, ..., base^{length-1})。
 template <typename F>
@@ -160,6 +201,42 @@ typename M::Target mixed_univariate_evaluate(
     using Tgt = typename M::Target;
     if (coefficients.empty()) return Tgt{};
 
+#ifdef _OPENMP
+    const int threads = omp_get_max_threads();
+    if (threads > 1 && coefficients.size() >= 4096) {
+        constexpr std::size_t min_chunk = 1024;
+        const std::size_t target_chunks = static_cast<std::size_t>(threads) * 4;
+        const std::size_t chunk_size =
+            std::max<std::size_t>(min_chunk, (coefficients.size() + target_chunks - 1) / target_chunks);
+        const std::size_t chunks = (coefficients.size() + chunk_size - 1) / chunk_size;
+        std::vector<Tgt> partials(chunks, Tgt{});
+
+        #pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t ci = 0; ci < static_cast<std::ptrdiff_t>(chunks); ++ci) {
+            const std::size_t chunk = static_cast<std::size_t>(ci);
+            const std::size_t start = chunk * chunk_size;
+            const std::size_t end = std::min(coefficients.size(), start + chunk_size);
+            if (start >= end) continue;
+
+            Tgt local = emb.map(coefficients[end - 1]);
+            for (std::size_t i = end - 1; i > start; --i) {
+                local *= point;
+                local = emb.mixed_add(local, coefficients[i - 1]);
+            }
+            if (start != 0) {
+                local *= point.pow(static_cast<std::uint64_t>(start));
+            }
+            partials[chunk] = local;
+        }
+
+        Tgt acc{};
+        for (const auto& part : partials) {
+            acc += part;
+        }
+        return acc;
+    }
+#endif
+
     Tgt acc = emb.map(coefficients.back());
     for (std::size_t i = coefficients.size() - 1; i > 0; --i) {
         acc *= point;
@@ -188,22 +265,33 @@ void geometric_accumulate(
 ) {
     assert(scalars.size() == points.size());
 #ifdef _OPENMP
-    if (accumulator.size() >= 4096) {
-        const std::size_t half = accumulator.size() / 2;
-        std::vector<F> scalars_high(scalars.size());
-        for (std::size_t j = 0; j < scalars.size(); ++j) {
-            scalars_high[j] = scalars[j] * points[j].pow(static_cast<std::uint64_t>(half));
-        }
+    const int threads = omp_get_max_threads();
+    if (threads > 1 && accumulator.size() >= 4096 && !points.empty()) {
+        constexpr std::size_t min_chunk = 1024;
+        const std::size_t target_chunks = static_cast<std::size_t>(threads) * 4;
+        const std::size_t chunk_size =
+            std::max<std::size_t>(min_chunk, (accumulator.size() + target_chunks - 1) / target_chunks);
+        const std::size_t chunks = (accumulator.size() + chunk_size - 1) / chunk_size;
 
-        #pragma omp parallel sections
-        {
-            #pragma omp section
-            {
-                geometric_accumulate<F>(accumulator.subspan(0, half), std::move(scalars), points);
+        #pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t ci = 0; ci < static_cast<std::ptrdiff_t>(chunks); ++ci) {
+            const std::size_t start = static_cast<std::size_t>(ci) * chunk_size;
+            const std::size_t end = std::min(accumulator.size(), start + chunk_size);
+
+            // 每个块独立推进几何级数到 start，之后保持与串行路径相同的逐项求和顺序。
+            std::vector<F> local_scalars = scalars;
+            for (std::size_t j = 0; j < local_scalars.size(); ++j) {
+                local_scalars[j] =
+                    local_scalars[j] * geometric_pow_step(points[j], static_cast<std::uint64_t>(start));
             }
-            #pragma omp section
-            {
-                geometric_accumulate<F>(accumulator.subspan(half), std::move(scalars_high), points);
+
+            for (std::size_t i = start; i < end; ++i) {
+                F entry = accumulator[i];
+                for (std::size_t j = 0; j < local_scalars.size(); ++j) {
+                    entry = entry + local_scalars[j];
+                    local_scalars[j] = geometric_mul_step(local_scalars[j], points[j]);
+                }
+                accumulator[i] = entry;
             }
         }
         return;
@@ -213,7 +301,7 @@ void geometric_accumulate(
     for (auto& entry : accumulator) {
         for (std::size_t j = 0; j < scalars.size(); ++j) {
             entry = entry + scalars[j];
-            scalars[j] = scalars[j] * points[j];
+            scalars[j] = geometric_mul_step(scalars[j], points[j]);
         }
     }
 }

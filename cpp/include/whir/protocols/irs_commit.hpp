@@ -42,6 +42,7 @@
 #include "../hash/blake3_engine.hpp"
 #include "../hash/hash_engine.hpp"
 #include "../hash/sha2_engine.hpp"
+#include "../profiling.hpp"
 #include "../utils.hpp"
 #include "challenge_indices.hpp"
 #include "merkle_tree.hpp"
@@ -354,17 +355,20 @@ struct Config {
         //    不同域类型需要不同的 NTT 引擎（Goldilocks/Ext2/Ext3
         //    具有不同的二次扩域结构）。
         std::vector<Source> matrix;
-        if constexpr (std::is_same_v<Source, ::whir::algebra::Goldilocks>) {
-            matrix = ::whir::algebra::ntt::interleaved_rs_encode<Source>(
-                ::whir::algebra::ntt::goldilocks_engine(), vectors, codeword_length, interleaving_depth);
-        } else if constexpr (std::is_same_v<Source, ::whir::algebra::GoldilocksExt2>) {
-            matrix = ::whir::algebra::ntt::interleaved_rs_encode<Source>(
-                ::whir::algebra::ntt::goldilocks_ext2_engine(), vectors, codeword_length, interleaving_depth);
-        } else if constexpr (std::is_same_v<Source, ::whir::algebra::GoldilocksExt3>) {
-            matrix = ::whir::algebra::ntt::interleaved_rs_encode<Source>(
-                ::whir::algebra::ntt::goldilocks_ext3_engine(), vectors, codeword_length, interleaving_depth);
-        } else {
-            static_assert(sizeof(Source) == 0, "IRS commit: unsupported field type");
+        {
+            ::whir::profile::ScopedTimer timer("prover", size(), "witness_encoding");
+            if constexpr (std::is_same_v<Source, ::whir::algebra::Goldilocks>) {
+                matrix = ::whir::algebra::ntt::interleaved_rs_encode<Source>(
+                    ::whir::algebra::ntt::goldilocks_engine(), vectors, codeword_length, interleaving_depth);
+            } else if constexpr (std::is_same_v<Source, ::whir::algebra::GoldilocksExt2>) {
+                matrix = ::whir::algebra::ntt::interleaved_rs_encode<Source>(
+                    ::whir::algebra::ntt::goldilocks_ext2_engine(), vectors, codeword_length, interleaving_depth);
+            } else if constexpr (std::is_same_v<Source, ::whir::algebra::GoldilocksExt3>) {
+                matrix = ::whir::algebra::ntt::interleaved_rs_encode<Source>(
+                    ::whir::algebra::ntt::goldilocks_ext3_engine(), vectors, codeword_length, interleaving_depth);
+            } else {
+                static_assert(sizeof(Source) == 0, "IRS commit: unsupported field type");
+            }
         }
 
         // 2. 逐行 LE 编码 + 哈希 -> 叶子哈希列表
@@ -378,8 +382,11 @@ struct Config {
                 ? static_cast<const ::whir::hash::HashEngine&>(sha2_engine)
                 : static_cast<const ::whir::hash::HashEngine&>(blake3_engine);
         std::vector<::whir::hash::Hash> leaves(num_rows);
-        ::whir::protocols::matrix_commit::commit_leaves<Source>(
-            leaf_engine, matrix, num_cols(), leaves);
+        {
+            ::whir::profile::ScopedTimer timer("prover", num_rows, "merkle_leaf_total");
+            ::whir::protocols::matrix_commit::commit_leaves<Source>(
+                leaf_engine, matrix, num_cols(), leaves);
+        }
 
         // 3. Merkle 树承诺 — 从叶子构建树，发送根。
         // SHA-256 + CUDA 可只回传 root，并保留 leaves 供 open 时按需生成路径。
@@ -398,6 +405,7 @@ struct Config {
         }
 #endif
         if (!committed_with_gpu_merkle_root) {
+            ::whir::profile::ScopedTimer timer("prover", num_rows, "merkle_build_total");
             mt_witness = merkle_tree::commit(prover_state,
                 matrix_commit_mt,
                 std::move(leaves),
@@ -414,14 +422,17 @@ struct Config {
         std::vector<Target> oods_matrix;
         oods_matrix.reserve(out_domain_samples * num_vectors);
 
-        for (const auto& point : oods_points) {
-            for (const auto& vec : vectors) {
-                // mixed_univariate_evaluate: 将基域系数嵌入扩域，
-                // 独立求值每个交错分量，合并为单个扩域值。
-                Target value = ::whir::algebra::mixed_univariate_evaluate<M>(
-                    embedding_val, vec, point);
-                prover_state.prover_message(value);
-                oods_matrix.push_back(value);
+        {
+            ::whir::profile::ScopedTimer timer("prover", vector_size, "ood_evaluation");
+            for (const auto& point : oods_points) {
+                for (const auto& vec : vectors) {
+                    // mixed_univariate_evaluate: 将基域系数嵌入扩域，
+                    // 独立求值每个交错分量，合并为单个扩域值。
+                    Target value = ::whir::algebra::mixed_univariate_evaluate<M>(
+                        embedding_val, vec, point);
+                    prover_state.prover_message(value);
+                    oods_matrix.push_back(value);
+                }
             }
         }
 

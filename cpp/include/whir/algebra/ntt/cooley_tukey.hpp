@@ -24,11 +24,15 @@
 
 #include "transpose.hpp"
 #include "utils.hpp"
+#include "../goldilocks_ext2.hpp"
+#include "../goldilocks_ext3.hpp"
+#include "../../profiling.hpp"
 
 #include <cassert>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <optional>
 #include <span>
 #include <type_traits>
@@ -42,9 +46,31 @@
 
 namespace whir::algebra {
 class Goldilocks;
+class GoldilocksExt3;
 }
 
 namespace whir::algebra::ntt {
+
+template <typename F>
+F mul_by_root(const F& value, const F& root) noexcept {
+    return value * root;
+}
+
+inline GoldilocksExt2 mul_by_root(const GoldilocksExt2& value, const GoldilocksExt2& root) noexcept {
+    if (root.c1().is_zero()) {
+        const Goldilocks scalar = root.c0();
+        return {value.c0() * scalar, value.c1() * scalar};
+    }
+    return value * root;
+}
+
+inline GoldilocksExt3 mul_by_root(const GoldilocksExt3& value, const GoldilocksExt3& root) noexcept {
+    if (root.c1().is_zero() && root.c2().is_zero()) {
+        const Goldilocks scalar = root.c0();
+        return {value.c0() * scalar, value.c1() * scalar, value.c2() * scalar};
+    }
+    return value * root;
+}
 
 // ============================================================================
 // apply_twiddles — 6 步 Cooley-Tukey 算法第 4 步
@@ -78,7 +104,7 @@ void apply_twiddles(std::span<F> values, std::span<const F> roots, std::size_t r
             std::size_t index = base_index;
             for (std::size_t j = 1; j < cols; ++j) {
                 index %= roots.size();
-                values[off + i * cols + j] = values[off + i * cols + j] * roots[index];
+                values[off + i * cols + j] = mul_by_root(values[off + i * cols + j], roots[index]);
                 index += base_index;
             }
         }
@@ -179,6 +205,11 @@ public:
         if constexpr (std::is_same_v<F, whir::algebra::Goldilocks>) {
         if (whir::cuda::gpu_dispatch_enabled() &&
             values.size() >= whir::cuda::gpu_ntt_threshold()) {
+            if (whir::profile::cuda_trace_enabled()) {
+                std::fprintf(stderr,
+                    "[CUDA NTT] using GPU fast path: total_elements=%zu size=%zu batch=%zu\n",
+                    values.size(), size, values.size() / size);
+            }
             auto& pool = whir::cuda::GpuPool::instance();
             if (pool.roots_len() != roots_.size() || pool.roots_host() != reinterpret_cast<const uint64_t*>(roots_.data()))
                 pool.upload_roots(reinterpret_cast<const uint64_t*>(roots_.data()), roots_.size());
@@ -188,6 +219,14 @@ public:
                 values.size(), size);
             return;
         }
+        if (whir::profile::cuda_trace_enabled()) {
+            std::fprintf(stderr,
+                "[CUDA NTT] CPU fallback: total_elements=%zu size=%zu threshold=%zu enabled=%d\n",
+                values.size(), size, whir::cuda::gpu_ntt_threshold(),
+                whir::cuda::gpu_dispatch_enabled() ? 1 : 0);
+        }
+        } else {
+            whir::profile::cuda_trace("[CUDA NTT] CPU fallback: GPU fast path only supports Goldilocks base field");
         }
 #endif
         const std::size_t num_blocks = values.size() / size;
@@ -217,6 +256,11 @@ public:
         if constexpr (std::is_same_v<F, whir::algebra::Goldilocks>) {
             if (whir::cuda::gpu_dispatch_enabled() &&
                 values.size() >= whir::cuda::gpu_ntt_threshold()) {
+                if (whir::profile::cuda_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[CUDA NTT] using GPU fast path with transpose: total_elements=%zu ntt_size=%zu rows=%zu cols=%zu\n",
+                        values.size(), ntt_size, rows, cols);
+                }
                 ensure_roots_table(ntt_size);
                 auto& pool = whir::cuda::GpuPool::instance();
                 if (pool.roots_len() != roots_.size() ||
@@ -229,6 +273,14 @@ public:
                     values.size(), ntt_size, rows, cols);
                 return true;
             }
+            if (whir::profile::cuda_trace_enabled()) {
+                std::fprintf(stderr,
+                    "[CUDA NTT] transpose CPU fallback: total_elements=%zu ntt_size=%zu threshold=%zu enabled=%d\n",
+                    values.size(), ntt_size, whir::cuda::gpu_ntt_threshold(),
+                    whir::cuda::gpu_dispatch_enabled() ? 1 : 0);
+            }
+        } else {
+            whir::profile::cuda_trace("[CUDA NTT] transpose CPU fallback: GPU fast path only supports Goldilocks base field");
         }
 #else
         (void)values;
@@ -256,7 +308,20 @@ public:
             const std::size_t total_size = coeffs.size() * interleaving_depth * codeword_length;
             if (!whir::cuda::gpu_dispatch_enabled() ||
                 total_size < whir::cuda::gpu_ntt_threshold()) {
+                if (whir::profile::cuda_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[CUDA RS] CPU fallback: num_polys=%zu poly_size=%zu codeword_length=%zu interleaving_depth=%zu total_elements=%zu threshold=%zu enabled=%d\n",
+                        coeffs.size(), poly_size, codeword_length, interleaving_depth,
+                        total_size, whir::cuda::gpu_ntt_threshold(),
+                        whir::cuda::gpu_dispatch_enabled() ? 1 : 0);
+                }
                 return false;
+            }
+
+            if (whir::profile::cuda_trace_enabled()) {
+                std::fprintf(stderr,
+                    "[CUDA RS] using GPU fast path: num_polys=%zu poly_size=%zu codeword_length=%zu interleaving_depth=%zu total_elements=%zu\n",
+                    coeffs.size(), poly_size, codeword_length, interleaving_depth, total_size);
             }
 
             ensure_roots_table(codeword_length);
@@ -278,6 +343,79 @@ public:
                 reinterpret_cast<uint64_t*>(out.data()),
                 coeffs.size(), poly_size, codeword_length, interleaving_depth);
             return true;
+        }
+        else if constexpr (std::is_same_v<F, whir::algebra::GoldilocksExt3>) {
+            if (coeffs.empty()) {
+                out.clear();
+                return true;
+            }
+            const std::size_t poly_size = coeffs[0].size();
+            const std::size_t total_size = coeffs.size() * interleaving_depth * codeword_length;
+            if (!whir::cuda::gpu_dispatch_enabled() ||
+                total_size < whir::cuda::gpu_ntt_threshold()) {
+                if (whir::profile::cuda_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[CUDA RS Ext3] CPU fallback: num_polys=%zu poly_size=%zu codeword_length=%zu interleaving_depth=%zu total_elements=%zu threshold=%zu enabled=%d\n",
+                        coeffs.size(), poly_size, codeword_length, interleaving_depth,
+                        total_size, whir::cuda::gpu_ntt_threshold(),
+                        whir::cuda::gpu_dispatch_enabled() ? 1 : 0);
+                }
+                return false;
+            }
+
+            if (whir::profile::cuda_trace_enabled()) {
+                std::fprintf(stderr,
+                    "[CUDA RS Ext3] using GPU fast path via 3 Goldilocks component NTTs: num_polys=%zu poly_size=%zu codeword_length=%zu interleaving_depth=%zu total_elements=%zu\n",
+                    coeffs.size(), poly_size, codeword_length, interleaving_depth, total_size);
+            }
+
+            ensure_roots_table(codeword_length);
+            std::vector<whir::algebra::Goldilocks> base_roots;
+            base_roots.reserve(roots_.size());
+            for (const auto& root : roots_) {
+                base_roots.push_back(root.c0());
+            }
+            auto& pool = whir::cuda::GpuPool::instance();
+            pool.upload_roots(reinterpret_cast<const uint64_t*>(base_roots.data()), base_roots.size());
+
+            std::vector<whir::algebra::Goldilocks> compact0;
+            std::vector<whir::algebra::Goldilocks> compact1;
+            std::vector<whir::algebra::Goldilocks> compact2;
+            compact0.reserve(coeffs.size() * poly_size);
+            compact1.reserve(coeffs.size() * poly_size);
+            compact2.reserve(coeffs.size() * poly_size);
+            for (const auto& poly : coeffs) {
+                for (const auto& x : poly) {
+                    compact0.push_back(x.c0());
+                    compact1.push_back(x.c1());
+                    compact2.push_back(x.c2());
+                }
+            }
+
+            std::vector<whir::algebra::Goldilocks> out0(total_size);
+            std::vector<whir::algebra::Goldilocks> out1(total_size);
+            std::vector<whir::algebra::Goldilocks> out2(total_size);
+            whir::cuda::gpu_interleaved_rs_encode(
+                reinterpret_cast<const uint64_t*>(compact0.data()),
+                reinterpret_cast<uint64_t*>(out0.data()),
+                coeffs.size(), poly_size, codeword_length, interleaving_depth);
+            whir::cuda::gpu_interleaved_rs_encode(
+                reinterpret_cast<const uint64_t*>(compact1.data()),
+                reinterpret_cast<uint64_t*>(out1.data()),
+                coeffs.size(), poly_size, codeword_length, interleaving_depth);
+            whir::cuda::gpu_interleaved_rs_encode(
+                reinterpret_cast<const uint64_t*>(compact2.data()),
+                reinterpret_cast<uint64_t*>(out2.data()),
+                coeffs.size(), poly_size, codeword_length, interleaving_depth);
+
+            out.resize(total_size);
+            for (std::size_t i = 0; i < total_size; ++i) {
+                out[i] = F{out0[i], out1[i], out2[i]};
+            }
+            return true;
+        }
+        else {
+            whir::profile::cuda_trace("[CUDA RS] CPU fallback: GPU fast path only supports Goldilocks/GoldilocksExt3");
         }
 #else
         (void)coeffs;
@@ -536,8 +674,8 @@ private:
                     v[1] = t1;
                     v[2] = t2;
                     v[0] = v[0] + v[1];
-                    v[1] = v[1] * half_omega_3_1_plus_2;
-                    v[2] = v[2] * half_omega_3_1_min_2;
+                    v[1] = mul_by_root(v[1], half_omega_3_1_plus_2);
+                    v[2] = mul_by_root(v[2], half_omega_3_1_min_2);
                     v[1] = v[1] + v0;
                     F u1 = v[1] + v[2];
                     F u2 = v[1] - v[2];
@@ -554,7 +692,7 @@ private:
                     F a13p = v[1] + v[3], a13m = v[1] - v[3];
                     v[0] = a02p; v[2] = a02m;
                     v[1] = a13p; v[3] = a13m;
-                    v[3] = v[3] * omega_4_1;
+                    v[3] = mul_by_root(v[3], omega_4_1);
                     F b01p = v[0] + v[1], b01m = v[0] - v[1];
                     F b23p = v[2] + v[3], b23m = v[2] - v[3];
                     v[0] = b01p; v[1] = b01m;
@@ -574,21 +712,21 @@ private:
                         F a2 = v[2] + v[6], a6 = v[2] - v[6]; v[2]=a2; v[6]=a6;
                         F a3 = v[3] + v[7], a7 = v[3] - v[7]; v[3]=a3; v[7]=a7;
                     }
-                    v[5] = v[5] * omega_8_1;
-                    v[6] = v[6] * omega_4_1;
-                    v[7] = v[7] * omega_8_3;
+                    v[5] = mul_by_root(v[5], omega_8_1);
+                    v[6] = mul_by_root(v[6], omega_4_1);
+                    v[7] = mul_by_root(v[7], omega_8_3);
                     {
                         F a0 = v[0] + v[2], a2 = v[0] - v[2]; v[0]=a0; v[2]=a2;
                         F a1 = v[1] + v[3], a3 = v[1] - v[3]; v[1]=a1; v[3]=a3;
                     }
-                    v[3] = v[3] * omega_4_1;
+                    v[3] = mul_by_root(v[3], omega_4_1);
                     {
                         F a0 = v[0] + v[1], a1 = v[0] - v[1]; v[0]=a0; v[1]=a1;
                         F a2 = v[2] + v[3], a3 = v[2] - v[3]; v[2]=a2; v[3]=a3;
                         F a4 = v[4] + v[6], a6 = v[4] - v[6]; v[4]=a4; v[6]=a6;
                         F a5 = v[5] + v[7], a7 = v[5] - v[7]; v[5]=a5; v[7]=a7;
                     }
-                    v[7] = v[7] * omega_4_1;
+                    v[7] = mul_by_root(v[7], omega_4_1);
                     {
                         F a4 = v[4] + v[5], a5 = v[4] - v[5]; v[4]=a4; v[5]=a5;
                         F a6 = v[6] + v[7], a7 = v[6] - v[7]; v[6]=a6; v[7]=a7;
@@ -607,21 +745,21 @@ private:
                         F* v = base + i;
                         F t0p = v[0] + v[8], t0m = v[0] - v[8]; v[0]=t0p; v[8]=t0m;
                         F t4p = v[4] + v[12], t4m = v[4] - v[12]; v[4]=t4p; v[12]=t4m;
-                        v[12] = v[12] * omega_4_1;
+                        v[12] = mul_by_root(v[12], omega_4_1);
                         F u0p = v[0] + v[4], u0m = v[0] - v[4]; v[0]=u0p; v[4]=u0m;
                         F u8p = v[8] + v[12], u8m = v[8] - v[12]; v[8]=u8p; v[12]=u8m;
                         std::swap(v[4], v[8]);
                     }
                     // twiddle 乘法（ω_16 的各次幂）
-                    base[5]  = base[5]  * omega_16_1;
-                    base[6]  = base[6]  * omega_8_1;
-                    base[7]  = base[7]  * omega_16_3;
-                    base[9]  = base[9]  * omega_8_1;
-                    base[10] = base[10] * omega_4_1;
-                    base[11] = base[11] * omega_8_3;
-                    base[13] = base[13] * omega_16_3;
-                    base[14] = base[14] * omega_8_3;
-                    base[15] = base[15] * omega_16_9;
+                    base[5]  = mul_by_root(base[5], omega_16_1);
+                    base[6]  = mul_by_root(base[6], omega_8_1);
+                    base[7]  = mul_by_root(base[7], omega_16_3);
+                    base[9]  = mul_by_root(base[9], omega_8_1);
+                    base[10] = mul_by_root(base[10], omega_4_1);
+                    base[11] = mul_by_root(base[11], omega_8_3);
+                    base[13] = mul_by_root(base[13], omega_16_3);
+                    base[14] = mul_by_root(base[14], omega_8_3);
+                    base[15] = mul_by_root(base[15], omega_16_9);
                     // 行 NTT（4 行，连续 4 元素块）
                     for (std::size_t i = 0; i < 4; ++i) {
                         F* v = base + i * 4;
@@ -629,7 +767,7 @@ private:
                         F a13p = v[1] + v[3], a13m = v[1] - v[3];
                         v[0]=a02p; v[2]=a02m;
                         v[1]=a13p; v[3]=a13m;
-                        v[3] = v[3] * omega_4_1;
+                        v[3] = mul_by_root(v[3], omega_4_1);
                         F b01p = v[0] + v[1], b01m = v[0] - v[1];
                         F b23p = v[2] + v[3], b23m = v[2] - v[3];
                         v[0]=b01p; v[1]=b01m;

@@ -1,0 +1,116 @@
+# ====================
+# 构建产物
+# ====================
+
+# CMake 构建目录
+build/
+build_*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# C/C++ 编译产物
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.idb
+*.ipdb
+*.iobj
+
+# ====================
+# Rust
+# ====================
+rust/target/
+**/*.rs.bk
+
+# ====================
+# Python
+# ====================
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+env/
+.env/
+
+# ====================
+# IDE 和编辑器
+# ====================
+
+# JetBrains
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# VS Code (保留配置文件)
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/c_cpp_properties.json
+
+# ====================
+# 操作系统
+# ====================
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+*~
+.directory
+
+# ====================
+# 临时文件
+# ====================
+*.tmp
+*.temp
+*.log
+*.bak
+*.swp
+*.swo
+.cache/
+
+# ====================
+# 项目特定
+# ====================
+
+# 测试输出
+dump_output/*.bin
+dump_output/*.json
+
+# 性能分析（保留测试用的 CSV）
+*.csv
+!tests/**/*.csv
+!rust/benches/**/*.csv

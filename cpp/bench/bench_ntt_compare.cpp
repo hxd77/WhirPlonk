@@ -79,6 +79,7 @@ struct CpuTiming {
 };
 
 struct GpuTimingRow {
+    double malloc_ms = 0.0;   // cudaMalloc/cudaFree 热路径分配耗时
     double h2d_ms = 0.0;      // Host → Device 传输耗时
     double kernel_ms = 0.0;   // GPU 内核计算耗时
     double d2h_ms = 0.0;      // Device → Host 回传耗时
@@ -133,13 +134,15 @@ static GpuTimingRow run_gpu(std::vector<Goldilocks>& values, std::size_t n) {
     // 强制启用 GPU 并将阈值设为 0，确保所有规模都走 GPU
     whir::cuda::set_gpu_dispatch_enabled(true);
     whir::cuda::set_gpu_ntt_threshold(0);
+    whir::cuda::cuda_warmup();
     engine.ntt_batch(std::span<Goldilocks>{values}, n);
     // 从 CUDA 集成层获取各阶段计时
     const auto timing = whir::cuda::last_ntt_timing();
     // 恢复原始配置
     whir::cuda::set_gpu_ntt_threshold(old_threshold);
     whir::cuda::set_gpu_dispatch_enabled(old_enabled);
-    return {timing.h2d_ms, timing.kernel_ms, timing.d2h_ms, timing.total_ms, timing.used_gpu};
+    return {timing.malloc_ms, timing.h2d_ms, timing.kernel_ms, timing.d2h_ms,
+            timing.total_ms + timing.malloc_ms, timing.used_gpu};
 #else
     (void)values;
     (void)n;
@@ -174,7 +177,7 @@ int main(int argc, char** argv) {
         }
 
         // ---- CSV 表头 ----
-        std::printf("input_size,cpu_ms,gpu_h2d_ms,gpu_kernel_ms,gpu_d2h_ms,gpu_total_ms,"
+        std::printf("input_size,cpu_ms,gpu_malloc_ms,gpu_h2d_ms,gpu_kernel_ms,gpu_d2h_ms,gpu_total_ms,"
                     "speedup_kernel_only,speedup_end_to_end,correctness\n");
 
         // ---- 逐尺寸运行基准测试 ----
@@ -215,8 +218,8 @@ int main(int argc, char** argv) {
                 best_gpu.available && best_gpu.total_ms > 0.0 ? best_cpu / best_gpu.total_ms : 0.0;
 
             // 输出一行 CSV
-            std::printf("%zu,%.6f,%.6f,%.6f,%.6f,%.6f,%.3f,%.3f,%s\n",
-                        n, best_cpu, best_gpu.h2d_ms, best_gpu.kernel_ms,
+            std::printf("%zu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.3f,%.3f,%s\n",
+                        n, best_cpu, best_gpu.malloc_ms, best_gpu.h2d_ms, best_gpu.kernel_ms,
                         best_gpu.d2h_ms, best_gpu.total_ms,
                         kernel_speedup, e2e_speedup,
                         best_gpu.available ? (correct ? "PASS" : "FAIL") : "GPU_UNAVAILABLE");
