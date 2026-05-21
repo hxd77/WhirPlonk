@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "C:/Users/DELL/Desktop/WhirPlonk/cpp/demo/demo_irs_commit.cpp" "tests/CMakeFiles/demo_irs_commit.dir/__/demo/demo_irs_commit.cpp.obj" "msvc" "tests/CMakeFiles/demo_irs_commit.dir/__/demo/demo_irs_commit.cpp.obj.d"
+  "/home/wwj/HXD/cpp/demo/demo_irs_commit.cpp" "tests/CMakeFiles/demo_irs_commit.dir/__/demo/demo_irs_commit.cpp.o" "gcc" "tests/CMakeFiles/demo_irs_commit.dir/__/demo/demo_irs_commit.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

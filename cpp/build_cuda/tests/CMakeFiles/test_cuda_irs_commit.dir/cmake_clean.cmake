@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/test_cuda_irs_commit.dir/test_cuda_irs_commit.cpp.obj"
-  "CMakeFiles/test_cuda_irs_commit.dir/test_cuda_irs_commit.cpp.obj.d"
-  "test_cuda_irs_commit.exe"
-  "test_cuda_irs_commit.exe.manifest"
-  "test_cuda_irs_commit.lib"
+  "CMakeFiles/test_cuda_irs_commit.dir/test_cuda_irs_commit.cpp.o"
+  "CMakeFiles/test_cuda_irs_commit.dir/test_cuda_irs_commit.cpp.o.d"
+  "test_cuda_irs_commit"
   "test_cuda_irs_commit.pdb"
   "test_cuda_irs_commit[1]_tests.cmake"
 )

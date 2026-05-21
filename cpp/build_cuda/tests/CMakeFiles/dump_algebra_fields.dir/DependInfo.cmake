@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "C:/Users/DELL/Desktop/WhirPlonk/cpp/tests/dump_algebra_fields.cpp" "tests/CMakeFiles/dump_algebra_fields.dir/dump_algebra_fields.cpp.obj" "msvc" "tests/CMakeFiles/dump_algebra_fields.dir/dump_algebra_fields.cpp.obj.d"
+  "/home/wwj/HXD/cpp/tests/dump_algebra_fields.cpp" "tests/CMakeFiles/dump_algebra_fields.dir/dump_algebra_fields.cpp.o" "gcc" "tests/CMakeFiles/dump_algebra_fields.dir/dump_algebra_fields.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

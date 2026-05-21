@@ -1,5 +1,5 @@
-if(EXISTS "C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cuda/tests/test_cuda_rs_sha256_leaves[1]_tests.cmake")
-  include("C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cuda/tests/test_cuda_rs_sha256_leaves[1]_tests.cmake")
+if(EXISTS "/home/wwj/HXD/cpp/build_cuda/tests/test_cuda_rs_sha256_leaves[1]_tests.cmake")
+  include("/home/wwj/HXD/cpp/build_cuda/tests/test_cuda_rs_sha256_leaves[1]_tests.cmake")
 else()
   add_test(test_cuda_rs_sha256_leaves_NOT_BUILT test_cuda_rs_sha256_leaves_NOT_BUILT)
 endif()

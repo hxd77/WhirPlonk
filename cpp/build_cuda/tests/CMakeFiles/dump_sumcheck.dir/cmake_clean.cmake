@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/dump_sumcheck.dir/dump_sumcheck.cpp.obj"
-  "CMakeFiles/dump_sumcheck.dir/dump_sumcheck.cpp.obj.d"
-  "dump_sumcheck.exe"
-  "dump_sumcheck.exe.manifest"
-  "dump_sumcheck.lib"
+  "CMakeFiles/dump_sumcheck.dir/dump_sumcheck.cpp.o"
+  "CMakeFiles/dump_sumcheck.dir/dump_sumcheck.cpp.o.d"
+  "dump_sumcheck"
   "dump_sumcheck.pdb"
 )
 

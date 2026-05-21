@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "C:/Users/DELL/Desktop/WhirPlonk/cpp/tests/test_cuda_ntt.cpp" "tests/CMakeFiles/test_cuda_ntt.dir/test_cuda_ntt.cpp.obj" "msvc" "tests/CMakeFiles/test_cuda_ntt.dir/test_cuda_ntt.cpp.obj.d"
+  "/home/wwj/HXD/cpp/tests/test_cuda_ntt.cpp" "tests/CMakeFiles/test_cuda_ntt.dir/test_cuda_ntt.cpp.o" "gcc" "tests/CMakeFiles/test_cuda_ntt.dir/test_cuda_ntt.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

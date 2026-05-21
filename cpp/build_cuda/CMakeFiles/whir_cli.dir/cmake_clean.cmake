@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/whir_cli.dir/main.cpp.obj"
-  "CMakeFiles/whir_cli.dir/main.cpp.obj.d"
-  "whir_cli.exe"
-  "whir_cli.exe.manifest"
-  "whir_cli.lib"
+  "CMakeFiles/whir_cli.dir/main.cpp.o"
+  "CMakeFiles/whir_cli.dir/main.cpp.o.d"
+  "whir_cli"
   "whir_cli.pdb"
 )
 

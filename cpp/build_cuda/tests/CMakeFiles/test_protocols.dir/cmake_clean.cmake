@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/test_protocols.dir/test_protocols.cpp.obj"
-  "CMakeFiles/test_protocols.dir/test_protocols.cpp.obj.d"
-  "test_protocols.exe"
-  "test_protocols.exe.manifest"
-  "test_protocols.lib"
+  "CMakeFiles/test_protocols.dir/test_protocols.cpp.o"
+  "CMakeFiles/test_protocols.dir/test_protocols.cpp.o.d"
+  "test_protocols"
   "test_protocols.pdb"
   "test_protocols[1]_tests.cmake"
 )

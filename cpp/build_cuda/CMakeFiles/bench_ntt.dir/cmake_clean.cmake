@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/bench_ntt.dir/bench/bench_ntt.cpp.obj"
-  "CMakeFiles/bench_ntt.dir/bench/bench_ntt.cpp.obj.d"
-  "bench_ntt.exe"
-  "bench_ntt.exe.manifest"
-  "bench_ntt.lib"
+  "CMakeFiles/bench_ntt.dir/bench/bench_ntt.cpp.o"
+  "CMakeFiles/bench_ntt.dir/bench/bench_ntt.cpp.o.d"
+  "bench_ntt"
   "bench_ntt.pdb"
 )
 

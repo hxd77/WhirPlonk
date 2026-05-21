@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/dump_algebra_ntt.dir/dump_algebra_ntt.cpp.obj"
-  "CMakeFiles/dump_algebra_ntt.dir/dump_algebra_ntt.cpp.obj.d"
-  "dump_algebra_ntt.exe"
-  "dump_algebra_ntt.exe.manifest"
-  "dump_algebra_ntt.lib"
+  "CMakeFiles/dump_algebra_ntt.dir/dump_algebra_ntt.cpp.o"
+  "CMakeFiles/dump_algebra_ntt.dir/dump_algebra_ntt.cpp.o.d"
+  "dump_algebra_ntt"
   "dump_algebra_ntt.pdb"
 )
 

@@ -47,6 +47,21 @@
 - `cuda/cuda_ntt.hpp`：主机端 API、`CUDA_CHECK`、RAII `DeviceBuffer`
 - `cuda/cuda_integration.hpp`：高层调度、内存池、计时、运行时开关
 
+GPU 内存池：
+
+- 静态 `GpuPool` 单例管理设备内存，避免反复 `cudaMalloc`/`cudaFree`
+- 提供 `data()`、`temp()`、`input()`、`bytes()` 等方法获取预分配缓冲区
+- `roots()` 缓存预计算的 twiddle 因子
+- `reset_alloc_timing()` 和 `last_alloc_ms()` 用于监控内存分配开销
+
+性能分析工具：
+
+- `include/whir/profiling.hpp`：提供 CSV 性能输出和 CUDA 跟踪功能
+- 环境变量 `WHIR_PROFILE=1` 启用 CSV 格式的性能数据输出到 stderr
+- 环境变量 `WHIR_CUDA_TRACE=1` 启用 CUDA 操作的详细跟踪
+- `ScopedTimer` RAII 类自动记录代码块执行时间
+- `record()` 函数手动记录性能数据点
+
 核函数映射：
 
 - 基-2 NTT：一个线程处理一对蝶形运算 `(a, b) -> (a + b*w, a - b*w)`
@@ -335,6 +350,28 @@ cmake -S cpp -B cpp/build_cuda -DUSE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89
 - `WHIR_CUDA_EXPERIMENTAL_NTT`：启用 Goldilocks NTT 调度
 
 如果未启用 CUDA，头文件正常编译，使用 CPU 实现。如果启用了 CUDA 但通过 `WHIR_CUDA_DISABLE=1` 禁用运行时调度，同样使用 CPU 实现。
+
+### 性能分析配置
+
+环境变量控制性能数据收集：
+
+```bash
+# 启用 CSV 性能输出（输出到 stderr）
+WHIR_PROFILE=1 ./cpp/build/whir_cli --num-variables 20
+
+# 启用 CUDA 操作跟踪
+WHIR_CUDA_TRACE=1 ./cpp/build_cuda/whir_cli --num-variables 20
+
+# 同时启用两者
+WHIR_PROFILE=1 WHIR_CUDA_TRACE=1 ./cpp/build_cuda/whir_cli
+```
+
+CSV 输出格式：
+```text
+mode,size,stage,time_ms
+ntt,1048576,gpu_kernel,12.345678
+rs_encode,1048576,gpu_total,45.678901
+```
 
 ### IRS 集成状态
 

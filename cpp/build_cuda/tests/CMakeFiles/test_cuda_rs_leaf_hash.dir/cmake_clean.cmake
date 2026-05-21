@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/test_cuda_rs_leaf_hash.dir/test_cuda_rs_leaf_hash.cpp.obj"
-  "CMakeFiles/test_cuda_rs_leaf_hash.dir/test_cuda_rs_leaf_hash.cpp.obj.d"
-  "test_cuda_rs_leaf_hash.exe"
-  "test_cuda_rs_leaf_hash.exe.manifest"
-  "test_cuda_rs_leaf_hash.lib"
+  "CMakeFiles/test_cuda_rs_leaf_hash.dir/test_cuda_rs_leaf_hash.cpp.o"
+  "CMakeFiles/test_cuda_rs_leaf_hash.dir/test_cuda_rs_leaf_hash.cpp.o.d"
+  "test_cuda_rs_leaf_hash"
   "test_cuda_rs_leaf_hash.pdb"
   "test_cuda_rs_leaf_hash[1]_tests.cmake"
 )

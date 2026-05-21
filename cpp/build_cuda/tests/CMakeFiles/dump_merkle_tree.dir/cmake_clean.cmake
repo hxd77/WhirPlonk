@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/dump_merkle_tree.dir/dump_merkle_tree.cpp.obj"
-  "CMakeFiles/dump_merkle_tree.dir/dump_merkle_tree.cpp.obj.d"
-  "dump_merkle_tree.exe"
-  "dump_merkle_tree.exe.manifest"
-  "dump_merkle_tree.lib"
+  "CMakeFiles/dump_merkle_tree.dir/dump_merkle_tree.cpp.o"
+  "CMakeFiles/dump_merkle_tree.dir/dump_merkle_tree.cpp.o.d"
+  "dump_merkle_tree"
   "dump_merkle_tree.pdb"
 )
 

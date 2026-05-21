@@ -1,12 +1,8 @@
 file(REMOVE_RECURSE
-  "../../../bin/gmock_main.pdb"
-  "../../../lib/gmock_main.lib"
-  "CMakeFiles/gmock_main.dir/__/googletest/src/gtest-all.cc.obj"
-  "CMakeFiles/gmock_main.dir/__/googletest/src/gtest-all.cc.obj.d"
-  "CMakeFiles/gmock_main.dir/src/gmock-all.cc.obj"
-  "CMakeFiles/gmock_main.dir/src/gmock-all.cc.obj.d"
-  "CMakeFiles/gmock_main.dir/src/gmock_main.cc.obj"
-  "CMakeFiles/gmock_main.dir/src/gmock_main.cc.obj.d"
+  "../../../bin/libgmock_main.pdb"
+  "../../../lib/libgmock_main.a"
+  "CMakeFiles/gmock_main.dir/src/gmock_main.cc.o"
+  "CMakeFiles/gmock_main.dir/src/gmock_main.cc.o.d"
 )
 
 # Per-language clean rules from dependency scanning.

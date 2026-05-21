@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "C:/Users/DELL/Desktop/WhirPlonk/cpp/tests/dump_transcript.cpp" "tests/CMakeFiles/dump_transcript.dir/dump_transcript.cpp.obj" "msvc" "tests/CMakeFiles/dump_transcript.dir/dump_transcript.cpp.obj.d"
+  "/home/wwj/HXD/cpp/tests/dump_transcript.cpp" "tests/CMakeFiles/dump_transcript.dir/dump_transcript.cpp.o" "gcc" "tests/CMakeFiles/dump_transcript.dir/dump_transcript.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

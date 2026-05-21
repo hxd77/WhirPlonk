@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/bench_irs_cuda_compare.dir/bench/bench_irs_cuda_compare.cpp.obj"
-  "CMakeFiles/bench_irs_cuda_compare.dir/bench/bench_irs_cuda_compare.cpp.obj.d"
-  "bench_irs_cuda_compare.exe"
-  "bench_irs_cuda_compare.exe.manifest"
-  "bench_irs_cuda_compare.lib"
+  "CMakeFiles/bench_irs_cuda_compare.dir/bench/bench_irs_cuda_compare.cpp.o"
+  "CMakeFiles/bench_irs_cuda_compare.dir/bench/bench_irs_cuda_compare.cpp.o.d"
+  "bench_irs_cuda_compare"
   "bench_irs_cuda_compare.pdb"
 )
 

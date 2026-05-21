@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "C:/Users/DELL/Desktop/WhirPlonk/cpp/tests/test_protocols.cpp" "tests/CMakeFiles/test_protocols.dir/test_protocols.cpp.obj" "msvc" "tests/CMakeFiles/test_protocols.dir/test_protocols.cpp.obj.d"
+  "/home/wwj/HXD/cpp/tests/test_protocols.cpp" "tests/CMakeFiles/test_protocols.dir/test_protocols.cpp.o" "gcc" "tests/CMakeFiles/test_protocols.dir/test_protocols.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

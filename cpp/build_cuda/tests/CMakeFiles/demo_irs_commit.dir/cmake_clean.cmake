@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/demo_irs_commit.dir/__/demo/demo_irs_commit.cpp.obj"
-  "CMakeFiles/demo_irs_commit.dir/__/demo/demo_irs_commit.cpp.obj.d"
-  "demo_irs_commit.exe"
-  "demo_irs_commit.exe.manifest"
-  "demo_irs_commit.lib"
+  "CMakeFiles/demo_irs_commit.dir/__/demo/demo_irs_commit.cpp.o"
+  "CMakeFiles/demo_irs_commit.dir/__/demo/demo_irs_commit.cpp.o.d"
+  "demo_irs_commit"
   "demo_irs_commit.pdb"
 )
 

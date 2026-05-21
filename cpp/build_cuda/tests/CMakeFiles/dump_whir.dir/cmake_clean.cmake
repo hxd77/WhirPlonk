@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/dump_whir.dir/dump_whir.cpp.obj"
-  "CMakeFiles/dump_whir.dir/dump_whir.cpp.obj.d"
-  "dump_whir.exe"
-  "dump_whir.exe.manifest"
-  "dump_whir.lib"
+  "CMakeFiles/dump_whir.dir/dump_whir.cpp.o"
+  "CMakeFiles/dump_whir.dir/dump_whir.cpp.o.d"
+  "dump_whir"
   "dump_whir.pdb"
 )
 

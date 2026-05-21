@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/dump_golden_algebra.dir/dump_golden_algebra.cpp.obj"
-  "CMakeFiles/dump_golden_algebra.dir/dump_golden_algebra.cpp.obj.d"
-  "dump_golden_algebra.exe"
-  "dump_golden_algebra.exe.manifest"
-  "dump_golden_algebra.lib"
+  "CMakeFiles/dump_golden_algebra.dir/dump_golden_algebra.cpp.o"
+  "CMakeFiles/dump_golden_algebra.dir/dump_golden_algebra.cpp.o.d"
+  "dump_golden_algebra"
   "dump_golden_algebra.pdb"
 )
 

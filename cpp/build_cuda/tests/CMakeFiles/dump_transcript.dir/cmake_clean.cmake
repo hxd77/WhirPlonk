@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/dump_transcript.dir/dump_transcript.cpp.obj"
-  "CMakeFiles/dump_transcript.dir/dump_transcript.cpp.obj.d"
-  "dump_transcript.exe"
-  "dump_transcript.exe.manifest"
-  "dump_transcript.lib"
+  "CMakeFiles/dump_transcript.dir/dump_transcript.cpp.o"
+  "CMakeFiles/dump_transcript.dir/dump_transcript.cpp.o.d"
+  "dump_transcript"
   "dump_transcript.pdb"
 )
 

@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/bench_merkle_sha256_compare.dir/bench/bench_merkle_sha256_compare.cpp.obj"
-  "CMakeFiles/bench_merkle_sha256_compare.dir/bench/bench_merkle_sha256_compare.cpp.obj.d"
-  "bench_merkle_sha256_compare.exe"
-  "bench_merkle_sha256_compare.exe.manifest"
-  "bench_merkle_sha256_compare.lib"
+  "CMakeFiles/bench_merkle_sha256_compare.dir/bench/bench_merkle_sha256_compare.cpp.o"
+  "CMakeFiles/bench_merkle_sha256_compare.dir/bench/bench_merkle_sha256_compare.cpp.o.d"
+  "bench_merkle_sha256_compare"
   "bench_merkle_sha256_compare.pdb"
 )
 

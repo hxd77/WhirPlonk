@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "C:/Users/DELL/Desktop/WhirPlonk/cpp/bench/bench_rs_encode.cpp" "CMakeFiles/bench_rs_encode.dir/bench/bench_rs_encode.cpp.obj" "msvc" "CMakeFiles/bench_rs_encode.dir/bench/bench_rs_encode.cpp.obj.d"
+  "/home/wwj/HXD/cpp/bench/bench_rs_encode.cpp" "CMakeFiles/bench_rs_encode.dir/bench/bench_rs_encode.cpp.o" "gcc" "CMakeFiles/bench_rs_encode.dir/bench/bench_rs_encode.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

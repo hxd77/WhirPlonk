@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/bench_rs_encode_bytes_compare.dir/bench/bench_rs_encode_bytes_compare.cpp.obj"
-  "CMakeFiles/bench_rs_encode_bytes_compare.dir/bench/bench_rs_encode_bytes_compare.cpp.obj.d"
-  "bench_rs_encode_bytes_compare.exe"
-  "bench_rs_encode_bytes_compare.exe.manifest"
-  "bench_rs_encode_bytes_compare.lib"
+  "CMakeFiles/bench_rs_encode_bytes_compare.dir/bench/bench_rs_encode_bytes_compare.cpp.o"
+  "CMakeFiles/bench_rs_encode_bytes_compare.dir/bench/bench_rs_encode_bytes_compare.cpp.o.d"
+  "bench_rs_encode_bytes_compare"
   "bench_rs_encode_bytes_compare.pdb"
 )
 

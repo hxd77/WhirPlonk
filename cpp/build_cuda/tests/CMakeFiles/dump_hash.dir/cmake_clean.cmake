@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/dump_hash.dir/dump_hash.cpp.obj"
-  "CMakeFiles/dump_hash.dir/dump_hash.cpp.obj.d"
-  "dump_hash.exe"
-  "dump_hash.exe.manifest"
-  "dump_hash.lib"
+  "CMakeFiles/dump_hash.dir/dump_hash.cpp.o"
+  "CMakeFiles/dump_hash.dir/dump_hash.cpp.o.d"
+  "dump_hash"
   "dump_hash.pdb"
 )
 

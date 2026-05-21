@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "C:/Users/DELL/Desktop/WhirPlonk/cpp/tests/dump_merkle_tree.cpp" "tests/CMakeFiles/dump_merkle_tree.dir/dump_merkle_tree.cpp.obj" "msvc" "tests/CMakeFiles/dump_merkle_tree.dir/dump_merkle_tree.cpp.obj.d"
+  "/home/wwj/HXD/cpp/tests/dump_merkle_tree.cpp" "tests/CMakeFiles/dump_merkle_tree.dir/dump_merkle_tree.cpp.o" "gcc" "tests/CMakeFiles/dump_merkle_tree.dir/dump_merkle_tree.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

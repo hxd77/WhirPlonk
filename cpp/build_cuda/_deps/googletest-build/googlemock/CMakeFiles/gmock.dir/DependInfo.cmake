@@ -8,8 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cuda/_deps/googletest-src/googletest/src/gtest-all.cc" "_deps/googletest-build/googlemock/CMakeFiles/gmock.dir/__/googletest/src/gtest-all.cc.obj" "msvc" "_deps/googletest-build/googlemock/CMakeFiles/gmock.dir/__/googletest/src/gtest-all.cc.obj.d"
-  "C:/Users/DELL/Desktop/WhirPlonk/cpp/build_cuda/_deps/googletest-src/googlemock/src/gmock-all.cc" "_deps/googletest-build/googlemock/CMakeFiles/gmock.dir/src/gmock-all.cc.obj" "msvc" "_deps/googletest-build/googlemock/CMakeFiles/gmock.dir/src/gmock-all.cc.obj.d"
+  "/home/wwj/HXD/cpp/build_cuda/_deps/googletest-src/googlemock/src/gmock-all.cc" "_deps/googletest-build/googlemock/CMakeFiles/gmock.dir/src/gmock-all.cc.o" "gcc" "_deps/googletest-build/googlemock/CMakeFiles/gmock.dir/src/gmock-all.cc.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/dump_pow.dir/dump_pow.cpp.obj"
-  "CMakeFiles/dump_pow.dir/dump_pow.cpp.obj.d"
-  "dump_pow.exe"
-  "dump_pow.exe.manifest"
-  "dump_pow.lib"
+  "CMakeFiles/dump_pow.dir/dump_pow.cpp.o"
+  "CMakeFiles/dump_pow.dir/dump_pow.cpp.o.d"
+  "dump_pow"
   "dump_pow.pdb"
 )
 

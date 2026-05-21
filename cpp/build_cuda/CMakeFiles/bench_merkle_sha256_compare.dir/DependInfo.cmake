@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "C:/Users/DELL/Desktop/WhirPlonk/cpp/bench/bench_merkle_sha256_compare.cpp" "CMakeFiles/bench_merkle_sha256_compare.dir/bench/bench_merkle_sha256_compare.cpp.obj" "msvc" "CMakeFiles/bench_merkle_sha256_compare.dir/bench/bench_merkle_sha256_compare.cpp.obj.d"
+  "/home/wwj/HXD/cpp/bench/bench_merkle_sha256_compare.cpp" "CMakeFiles/bench_merkle_sha256_compare.dir/bench/bench_merkle_sha256_compare.cpp.o" "gcc" "CMakeFiles/bench_merkle_sha256_compare.dir/bench/bench_merkle_sha256_compare.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

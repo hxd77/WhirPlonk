@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/dump_algebra_fields.dir/dump_algebra_fields.cpp.obj"
-  "CMakeFiles/dump_algebra_fields.dir/dump_algebra_fields.cpp.obj.d"
-  "dump_algebra_fields.exe"
-  "dump_algebra_fields.exe.manifest"
-  "dump_algebra_fields.lib"
+  "CMakeFiles/dump_algebra_fields.dir/dump_algebra_fields.cpp.o"
+  "CMakeFiles/dump_algebra_fields.dir/dump_algebra_fields.cpp.o.d"
+  "dump_algebra_fields"
   "dump_algebra_fields.pdb"
 )
 

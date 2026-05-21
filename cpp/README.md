@@ -17,6 +17,7 @@
 - 可选的 OpenMP 多线程加速
 - 可选的 CUDA GPU 加速（NTT、RS 编码、Merkle 哈希）
 - Blake3 SIMD 加速（SSE4.1/AVX2/AVX512）
+- 性能分析工具（CSV 输出、CUDA 跟踪）
 
 当前限制：
 
@@ -327,6 +328,7 @@ cpp/
 │   ├── deterministic_rng.hpp   #   确定性 RNG
 │   ├── engines.hpp             #   引擎注册
 │   ├── bits.hpp                #   位操作
+│   ├── profiling.hpp           #   性能分析工具（CSV 输出、CUDA 跟踪）
 │   └── utils.hpp               #   通用工具
 │
 ├── cuda/                       # CUDA GPU 加速
@@ -357,9 +359,13 @@ cpp/
 ├── dump_output/                # Golden dump 输出目录
 │   ├── field_ouput/            #   域运算输出
 │   ├── hash_output/            #   哈希输出
+│   ├── indices_output/         #   挑战索引输出
+│   ├── matrix_commit_output/   #   矩阵承诺输出
 │   ├── merkle_tree_output/     #   Merkle 树输出
+│   ├── pow_output/             #   工作量证明输出
 │   ├── sumcheck_output/        #   Sumcheck 输出
 │   ├── transcript_output/      #   Transcript 输出
+│   ├── utils_output/           #   代数工具输出
 │   └── whir_output/            #   WHIR 协议输出
 │
 └── third_party/                # 第三方 C 依赖（vendored）

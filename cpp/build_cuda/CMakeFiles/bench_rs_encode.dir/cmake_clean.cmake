@@ -1,9 +1,7 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/bench_rs_encode.dir/bench/bench_rs_encode.cpp.obj"
-  "CMakeFiles/bench_rs_encode.dir/bench/bench_rs_encode.cpp.obj.d"
-  "bench_rs_encode.exe"
-  "bench_rs_encode.exe.manifest"
-  "bench_rs_encode.lib"
+  "CMakeFiles/bench_rs_encode.dir/bench/bench_rs_encode.cpp.o"
+  "CMakeFiles/bench_rs_encode.dir/bench/bench_rs_encode.cpp.o.d"
+  "bench_rs_encode"
   "bench_rs_encode.pdb"
 )
 
