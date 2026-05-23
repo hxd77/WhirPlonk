@@ -355,11 +355,20 @@ struct Config {
         //    不同域类型需要不同的 NTT 引擎（Goldilocks/Ext2/Ext3
         //    具有不同的二次扩域结构）。
         std::vector<Source> matrix;
+        std::vector<::whir::hash::Hash> leaves;
+        bool leaves_ready = false;
         {
             ::whir::profile::ScopedTimer timer("prover", size(), "witness_encoding");
             if constexpr (std::is_same_v<Source, ::whir::algebra::Goldilocks>) {
-                matrix = ::whir::algebra::ntt::interleaved_rs_encode<Source>(
-                    ::whir::algebra::ntt::goldilocks_engine(), vectors, codeword_length, interleaving_depth);
+                auto& engine = ::whir::algebra::ntt::goldilocks_engine();
+                if (matrix_hash_id == ::whir::hash::ENGINE_ID_BLAKE3 &&
+                    engine.try_gpu_interleaved_rs_encode_blake3_matrix_leaves(
+                        vectors, codeword_length, interleaving_depth, matrix, leaves)) {
+                    leaves_ready = true;
+                } else {
+                    matrix = ::whir::algebra::ntt::interleaved_rs_encode<Source>(
+                        engine, vectors, codeword_length, interleaving_depth);
+                }
             } else if constexpr (std::is_same_v<Source, ::whir::algebra::GoldilocksExt2>) {
                 matrix = ::whir::algebra::ntt::interleaved_rs_encode<Source>(
                     ::whir::algebra::ntt::goldilocks_ext2_engine(), vectors, codeword_length, interleaving_depth);
@@ -381,8 +390,8 @@ struct Config {
             (matrix_hash_id == ::whir::hash::ENGINE_ID_SHA2)
                 ? static_cast<const ::whir::hash::HashEngine&>(sha2_engine)
                 : static_cast<const ::whir::hash::HashEngine&>(blake3_engine);
-        std::vector<::whir::hash::Hash> leaves(num_rows);
-        {
+        if (!leaves_ready) {
+            leaves.resize(num_rows);
             ::whir::profile::ScopedTimer timer("prover", num_rows, "merkle_leaf_total");
             ::whir::protocols::matrix_commit::commit_leaves<Source>(
                 leaf_engine, matrix, num_cols(), leaves);

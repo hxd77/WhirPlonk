@@ -381,6 +381,160 @@ __global__ void sha256_hash_goldilocks_rows_kernel(
 }
 
 // =============================================================================
+// BLAKE3 批量哈希内核
+// =============================================================================
+__device__ __constant__ uint32_t BLAKE3_IV_CUDA[8] = {
+    0x6A09E667u, 0xBB67AE85u, 0x3C6EF372u, 0xA54FF53Au,
+    0x510E527Fu, 0x9B05688Cu, 0x1F83D9ABu, 0x5BE0CD19u,
+};
+
+__device__ __constant__ uint8_t BLAKE3_MSG_PERM_CUDA[16] = {
+    2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8,
+};
+
+__device__ __forceinline__ uint32_t rotr32_blake3(uint32_t x, uint32_t n) {
+    return (x >> n) | (x << (32u - n));
+}
+
+__device__ __forceinline__ uint32_t load_le32(const uint8_t* p) {
+    return static_cast<uint32_t>(p[0]) |
+           (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) |
+           (static_cast<uint32_t>(p[3]) << 24);
+}
+
+__device__ __forceinline__ void store_le32(uint8_t* p, uint32_t v) {
+    p[0] = static_cast<uint8_t>(v);
+    p[1] = static_cast<uint8_t>(v >> 8);
+    p[2] = static_cast<uint8_t>(v >> 16);
+    p[3] = static_cast<uint8_t>(v >> 24);
+}
+
+__device__ __forceinline__ void blake3_g(uint32_t state[16], uint32_t a, uint32_t b,
+                                         uint32_t c, uint32_t d, uint32_t mx, uint32_t my) {
+    state[a] = state[a] + state[b] + mx;
+    state[d] = rotr32_blake3(state[d] ^ state[a], 16);
+    state[c] = state[c] + state[d];
+    state[b] = rotr32_blake3(state[b] ^ state[c], 12);
+    state[a] = state[a] + state[b] + my;
+    state[d] = rotr32_blake3(state[d] ^ state[a], 8);
+    state[c] = state[c] + state[d];
+    state[b] = rotr32_blake3(state[b] ^ state[c], 7);
+}
+
+__device__ __forceinline__ void blake3_round(uint32_t state[16], const uint32_t msg[16]) {
+    blake3_g(state, 0, 4, 8, 12, msg[0], msg[1]);
+    blake3_g(state, 1, 5, 9, 13, msg[2], msg[3]);
+    blake3_g(state, 2, 6, 10, 14, msg[4], msg[5]);
+    blake3_g(state, 3, 7, 11, 15, msg[6], msg[7]);
+    blake3_g(state, 0, 5, 10, 15, msg[8], msg[9]);
+    blake3_g(state, 1, 6, 11, 12, msg[10], msg[11]);
+    blake3_g(state, 2, 7, 8, 13, msg[12], msg[13]);
+    blake3_g(state, 3, 4, 9, 14, msg[14], msg[15]);
+}
+
+__device__ __forceinline__ void blake3_permute(uint32_t msg[16]) {
+    uint32_t tmp[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) tmp[i] = msg[BLAKE3_MSG_PERM_CUDA[i]];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) msg[i] = tmp[i];
+}
+
+__device__ __forceinline__ void blake3_compress_in_place_cuda(
+    uint32_t cv[8], const uint8_t block[64], uint32_t block_len, uint32_t flags)
+{
+    uint32_t block_words[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) block_words[i] = load_le32(block + i * 4);
+
+    uint32_t state[16];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) state[i] = cv[i];
+    state[8] = BLAKE3_IV_CUDA[0];
+    state[9] = BLAKE3_IV_CUDA[1];
+    state[10] = BLAKE3_IV_CUDA[2];
+    state[11] = BLAKE3_IV_CUDA[3];
+    state[12] = 0u;
+    state[13] = 0u;
+    state[14] = block_len;
+    state[15] = flags;
+
+#pragma unroll
+    for (int round = 0; round < 7; ++round) {
+        blake3_round(state, block_words);
+        if (round != 6) blake3_permute(block_words);
+    }
+
+#pragma unroll
+    for (int i = 0; i < 8; ++i) cv[i] = state[i] ^ state[i + 8];
+}
+
+__device__ __forceinline__ void blake3_hash_fixed_cuda(
+    const uint8_t* src, uint32_t message_size, uint8_t* dst)
+{
+    uint32_t cv[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) cv[i] = BLAKE3_IV_CUDA[i];
+
+    const uint32_t blocks = message_size / 64u;
+    for (uint32_t b = 0; b < blocks; ++b) {
+        uint8_t block[64];
+#pragma unroll
+        for (int i = 0; i < 64; ++i) block[i] = src[b * 64u + i];
+        uint32_t flags = 0u;
+        if (b == 0) flags |= 1u;
+        if (b + 1u == blocks) flags |= 2u | 8u;
+        blake3_compress_in_place_cuda(cv, block, 64u, flags);
+    }
+
+#pragma unroll
+    for (int i = 0; i < 8; ++i) store_le32(dst + i * 4, cv[i]);
+}
+
+__global__ void blake3_hash_many_kernel(
+    const uint8_t* input, uint8_t* output, uint32_t message_size, uint32_t count)
+{
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    for (uint32_t msg = tid; msg < count; msg += blockDim.x * gridDim.x) {
+        blake3_hash_fixed_cuda(
+            input + static_cast<uint64_t>(msg) * message_size,
+            message_size,
+            output + static_cast<uint64_t>(msg) * 32u);
+    }
+}
+
+__global__ void blake3_hash_goldilocks_rows_kernel(
+    const uint64_t* input, uint8_t* output, uint32_t row_elements, uint32_t count)
+{
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t message_size = row_elements * 8u;
+    for (uint32_t msg = tid; msg < count; msg += blockDim.x * gridDim.x) {
+        const uint64_t* src = input + static_cast<uint64_t>(msg) * row_elements;
+        uint8_t* dst = output + static_cast<uint64_t>(msg) * 32u;
+        uint32_t cv[8];
+#pragma unroll
+        for (int i = 0; i < 8; ++i) cv[i] = BLAKE3_IV_CUDA[i];
+
+        const uint32_t blocks = message_size / 64u;
+        for (uint32_t b = 0; b < blocks; ++b) {
+            uint8_t block[64];
+#pragma unroll
+            for (int e = 0; e < 8; ++e) {
+                store_goldilocks_le_element(src[b * 8u + static_cast<uint32_t>(e)], block + e * 8);
+            }
+            uint32_t flags = 0u;
+            if (b == 0) flags |= 1u;
+            if (b + 1u == blocks) flags |= 2u | 8u;
+            blake3_compress_in_place_cuda(cv, block, 64u, flags);
+        }
+
+#pragma unroll
+        for (int i = 0; i < 8; ++i) store_le32(dst + i * 4, cv[i]);
+    }
+}
+
+// =============================================================================
 // GoldilocksExt3 编码内核
 //
 // Ext3 元素 = c0 + c1·x + c2·x², 三个独立基域分量.
@@ -431,74 +585,102 @@ namespace whir::cuda {
 static constexpr uint32_t BLOCK = 256;
 
 void launch_ntt_radix2(uint64_t* data, const uint64_t* roots,
-                       uint32_t n, uint32_t stride, uint32_t batches) {
+                       uint32_t n, uint32_t stride, uint32_t batches, cudaStream_t stream) {
     uint32_t total_pairs = (n / 2) * batches;
     uint32_t grid = div_up(total_pairs, BLOCK);
     grid = std::min(grid, 4096u);
-    ntt_radix2_kernel<<<grid, BLOCK>>>(data, roots, n, stride, batches);
+    ntt_radix2_kernel<<<grid, BLOCK, 0, stream>>>(data, roots, n, stride, batches);
     CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_ntt_radix4(uint64_t* data, const uint64_t* roots,
-                       uint32_t n, uint32_t stride, uint32_t batches) {
+                       uint32_t n, uint32_t stride, uint32_t batches, cudaStream_t stream) {
     uint32_t total_blocks = (n / 4) * batches;
     uint32_t grid = div_up(total_blocks, BLOCK);
     grid = std::min(grid, 4096u);
-    ntt_radix4_kernel<<<grid, BLOCK>>>(data, roots, n, stride, batches);
+    ntt_radix4_kernel<<<grid, BLOCK, 0, stream>>>(data, roots, n, stride, batches);
     CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_apply_twiddles(uint64_t* data, const uint64_t* roots,
-                           uint32_t rows, uint32_t cols, uint32_t step, uint32_t batches) {
+                           uint32_t rows, uint32_t cols, uint32_t step, uint32_t batches,
+                           cudaStream_t stream) {
     uint32_t total = rows * cols * batches;
     uint32_t grid = div_up(total, BLOCK);
     grid = std::min(grid, 4096u);
-    apply_twiddles_kernel<<<grid, BLOCK>>>(data, roots, rows, cols, step, batches);
+    apply_twiddles_kernel<<<grid, BLOCK, 0, stream>>>(data, roots, rows, cols, step, batches);
     CUDA_CHECK(cudaGetLastError());
 }
 
-void launch_transpose(const uint64_t* src, uint64_t* dst, uint32_t rows, uint32_t cols, uint32_t batches) {
+void launch_transpose(const uint64_t* src, uint64_t* dst, uint32_t rows, uint32_t cols,
+                      uint32_t batches, cudaStream_t stream) {
     uint32_t total = rows * cols * batches;
     uint32_t grid = div_up(total, BLOCK);
     grid = std::min(grid, 4096u);
-    transpose_kernel<<<grid, BLOCK>>>(src, dst, rows, cols, batches);
+    transpose_kernel<<<grid, BLOCK, 0, stream>>>(src, dst, rows, cols, batches);
     CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_pack_rs_coeffs(const uint64_t* coeffs, uint64_t* out,
                            uint32_t poly_size, uint32_t codeword_length,
-                           uint32_t interleaving_depth, uint32_t num_polys) {
+                           uint32_t interleaving_depth, uint32_t num_polys,
+                           cudaStream_t stream) {
     uint32_t total = poly_size * num_polys;
     uint32_t grid = div_up(total, BLOCK);
     grid = std::min(grid, 4096u);
-    pack_rs_coeffs_kernel<<<grid, BLOCK>>>(coeffs, out, poly_size, codeword_length,
-                                           interleaving_depth, num_polys);
+    pack_rs_coeffs_kernel<<<grid, BLOCK, 0, stream>>>(coeffs, out, poly_size, codeword_length,
+                                                      interleaving_depth, num_polys);
     CUDA_CHECK(cudaGetLastError());
 }
 
-void launch_encode_to_bytes(const uint64_t* values, uint8_t* out, uint32_t count) {
+void launch_encode_to_bytes(const uint64_t* values, uint8_t* out, uint32_t count, cudaStream_t stream) {
     uint32_t grid = div_up(count, BLOCK);
     grid = std::min(grid, 4096u);
-    encode_to_bytes_kernel<<<grid, BLOCK>>>(values, out, count);
+    encode_to_bytes_kernel<<<grid, BLOCK, 0, stream>>>(values, out, count);
     CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_sha256_hash_many(const uint8_t* input, uint8_t* output,
-                             uint32_t message_size, uint32_t count) {
+                             uint32_t message_size, uint32_t count, cudaStream_t stream) {
     uint32_t grid = div_up(count, BLOCK);
     grid = std::min(grid, 4096u);
-    sha256_hash_many_kernel<<<grid, BLOCK>>>(input, output, message_size, count);
+    sha256_hash_many_kernel<<<grid, BLOCK, 0, stream>>>(input, output, message_size, count);
     CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_sha256_hash_goldilocks_rows(const uint64_t* input, uint8_t* output,
-                                        uint32_t row_elements, uint32_t count) {
+                                        uint32_t row_elements, uint32_t count,
+                                        cudaStream_t stream) {
     static constexpr uint32_t CHUNK = 65536;
     for (uint32_t base = 0; base < count; base += CHUNK) {
         const uint32_t chunk = std::min(CHUNK, count - base);
         uint32_t grid = div_up(chunk, BLOCK);
         grid = std::min(grid, 256u);
-        sha256_hash_goldilocks_rows_kernel<<<grid, BLOCK>>>(
+        sha256_hash_goldilocks_rows_kernel<<<grid, BLOCK, 0, stream>>>(
+            input + static_cast<uint64_t>(base) * row_elements,
+            output + static_cast<uint64_t>(base) * 32u,
+            row_elements, chunk);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+void launch_blake3_hash_many(const uint8_t* input, uint8_t* output,
+                             uint32_t message_size, uint32_t count, cudaStream_t stream) {
+    uint32_t grid = div_up(count, BLOCK);
+    grid = std::min(grid, 4096u);
+    blake3_hash_many_kernel<<<grid, BLOCK, 0, stream>>>(input, output, message_size, count);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_blake3_hash_goldilocks_rows(const uint64_t* input, uint8_t* output,
+                                        uint32_t row_elements, uint32_t count,
+                                        cudaStream_t stream) {
+    static constexpr uint32_t CHUNK = 65536;
+    for (uint32_t base = 0; base < count; base += CHUNK) {
+        const uint32_t chunk = std::min(CHUNK, count - base);
+        uint32_t grid = div_up(chunk, BLOCK);
+        grid = std::min(grid, 256u);
+        blake3_hash_goldilocks_rows_kernel<<<grid, BLOCK, 0, stream>>>(
             input + static_cast<uint64_t>(base) * row_elements,
             output + static_cast<uint64_t>(base) * 32u,
             row_elements, chunk);
@@ -507,19 +689,20 @@ void launch_sha256_hash_goldilocks_rows(const uint64_t* input, uint8_t* output,
 }
 
 void launch_gather_hashes(const uint8_t* nodes, const uint64_t* node_indices,
-                          uint8_t* out, uint32_t count) {
+                          uint8_t* out, uint32_t count, cudaStream_t stream) {
     if (count == 0) return;
     uint32_t grid = div_up(count, BLOCK);
     grid = std::min(grid, 4096u);
-    gather_hashes_kernel<<<grid, BLOCK>>>(nodes, node_indices, out, count);
+    gather_hashes_kernel<<<grid, BLOCK, 0, stream>>>(nodes, node_indices, out, count);
     CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_encode_ext3_to_bytes(const uint64_t* c0, const uint64_t* c1,
-                                  const uint64_t* c2, uint8_t* out, uint32_t count) {
+                                  const uint64_t* c2, uint8_t* out, uint32_t count,
+                                  cudaStream_t stream) {
     uint32_t grid = div_up(count, BLOCK);
     grid = std::min(grid, 4096u);
-    encode_ext3_to_bytes_kernel<<<grid, BLOCK>>>(c0, c1, c2, out, count);
+    encode_ext3_to_bytes_kernel<<<grid, BLOCK, 0, stream>>>(c0, c1, c2, out, count);
     CUDA_CHECK(cudaGetLastError());
 }
 

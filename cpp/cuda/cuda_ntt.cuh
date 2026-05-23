@@ -164,6 +164,16 @@ __global__ void sha256_hash_many_kernel(
 __global__ void sha256_hash_goldilocks_rows_kernel(
     const uint64_t* input, uint8_t* output, uint32_t row_elements, uint32_t count);
 
+/// BLAKE3 批量哈希内核.
+/// 支持现有 CPU Blake3 fast path 的固定消息大小: message_size 为 64 的倍数且 <= 1024.
+__global__ void blake3_hash_many_kernel(
+    const uint8_t* input, uint8_t* output, uint32_t message_size, uint32_t count);
+
+/// BLAKE3 Goldilocks leaf 哈希内核.
+/// 每个 thread 处理转置后矩阵的一行: from_mont(values) -> LE 字节流 -> BLAKE3 digest.
+__global__ void blake3_hash_goldilocks_rows_kernel(
+    const uint64_t* input, uint8_t* output, uint32_t row_elements, uint32_t count);
+
 /// 指定 Merkle node index 的 32B hash gather 内核.
 /// 每个 thread 复制一个 hash: out[i] = nodes[node_indices[i]].
 __global__ void gather_hashes_kernel(

@@ -109,7 +109,22 @@ std::vector<F> ark_ntt(
     // 转置后，第 i 行包含所有多项式在第 i 个求值点处的取值。
     {
         ::whir::profile::ScopedTimer timer("cpu", total_size, "rs_transpose");
-        transpose<F>(std::span<F>{result}, rows_before_transpose, codeword_length);
+        if (rows_before_transpose != codeword_length) {
+            std::vector<F> transposed(total_size);
+#ifdef _OPENMP
+            #pragma omp parallel for schedule(static) if(codeword_length >= 4096)
+#endif
+            for (std::ptrdiff_t cj = 0; cj < static_cast<std::ptrdiff_t>(codeword_length); ++cj) {
+                const std::size_t j = static_cast<std::size_t>(cj);
+                F* dst = transposed.data() + j * rows_before_transpose;
+                for (std::size_t i = 0; i < rows_before_transpose; ++i) {
+                    dst[i] = result[i * codeword_length + j];
+                }
+            }
+            result = std::move(transposed);
+        } else {
+            transpose<F>(std::span<F>{result}, rows_before_transpose, codeword_length);
+        }
     }
     return result;
 }

@@ -1,5 +1,0 @@
-add_test([=[CudaNtt.MatchesCpuForRandomGoldilocksInputs]=]  /home/wwj/HXD/cpp/build_cuda/tests/test_cuda_ntt [==[--gtest_filter=CudaNtt.MatchesCpuForRandomGoldilocksInputs]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[CudaNtt.MatchesCpuForRandomGoldilocksInputs]=]  PROPERTIES WORKING_DIRECTORY /home/wwj/HXD/cpp/build_cuda/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-add_test([=[CudaNtt.MatchesCpuForSpecialValues]=]  /home/wwj/HXD/cpp/build_cuda/tests/test_cuda_ntt [==[--gtest_filter=CudaNtt.MatchesCpuForSpecialValues]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[CudaNtt.MatchesCpuForSpecialValues]=]  PROPERTIES WORKING_DIRECTORY /home/wwj/HXD/cpp/build_cuda/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-set(  test_cuda_ntt_TESTS CudaNtt.MatchesCpuForRandomGoldilocksInputs CudaNtt.MatchesCpuForSpecialValues)

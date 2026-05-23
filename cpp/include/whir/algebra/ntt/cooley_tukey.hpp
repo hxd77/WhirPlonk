@@ -26,6 +26,7 @@
 #include "utils.hpp"
 #include "../goldilocks_ext2.hpp"
 #include "../goldilocks_ext3.hpp"
+#include "../../hash/hash_engine.hpp"
 #include "../../profiling.hpp"
 
 #include <cassert>
@@ -230,9 +231,23 @@ public:
         }
 #endif
         const std::size_t num_blocks = values.size() / size;
+        if (is_power_of_two(size) && size >= 32) {
+#ifdef _OPENMP
+            if (num_blocks > 1 && size >= 1024) {
+                #pragma omp parallel for schedule(static)
+                for (std::ptrdiff_t bi = 0; bi < static_cast<std::ptrdiff_t>(num_blocks); ++bi) {
+                    F* block = values.data() + static_cast<std::size_t>(bi) * size;
+                    ntt_power_of_two(std::span<F>{block, size}, std::span<const F>{roots_});
+                }
+                return;
+            }
+#endif
+            ntt_power_of_two(values, std::span<const F>{roots_}, size);
+            return;
+        }
 #ifdef _OPENMP
         if (num_blocks > 1 && size >= 1024) {
-            #pragma omp parallel for
+            #pragma omp parallel for schedule(static)
             for (std::ptrdiff_t bi = 0; bi < static_cast<std::ptrdiff_t>(num_blocks); ++bi) {
                 F* block = values.data() + static_cast<std::size_t>(bi) * size;
                 ntt_dispatch(std::span<F>{block, size}, std::span<const F>{roots_}, size);
@@ -427,6 +442,61 @@ public:
     }
 
     // 尝试在 GPU 上执行 RS 编码并直接返回 Goldilocks 小端字节。
+    bool try_gpu_interleaved_rs_encode_blake3_matrix_leaves(
+        std::span<const std::span<const F>> coeffs,
+        std::size_t codeword_length,
+        std::size_t interleaving_depth,
+        std::vector<F>& out_matrix,
+        std::vector<::whir::hash::Hash>& out_leaves
+    ) {
+#if defined(WHIR_CUDA) && defined(WHIR_CUDA_EXPERIMENTAL_NTT)
+        if constexpr (std::is_same_v<F, whir::algebra::Goldilocks>) {
+            if (coeffs.empty()) {
+                out_matrix.clear();
+                out_leaves.clear();
+                return true;
+            }
+            const std::size_t poly_size = coeffs[0].size();
+            const std::size_t rows = coeffs.size() * interleaving_depth;
+            const std::size_t total_size = rows * codeword_length;
+            const std::size_t message_size = rows * sizeof(uint64_t);
+            if (!whir::cuda::gpu_dispatch_enabled() ||
+                total_size < whir::cuda::gpu_ntt_threshold() ||
+                message_size == 0 ||
+                (message_size % 64) != 0 ||
+                message_size > 1024) {
+                return false;
+            }
+
+            ensure_roots_table(codeword_length);
+            auto& pool = whir::cuda::GpuPool::instance();
+            if (pool.roots_len() != roots_.size() ||
+                pool.roots_host() != reinterpret_cast<const uint64_t*>(roots_.data())) {
+                pool.upload_roots(reinterpret_cast<const uint64_t*>(roots_.data()), roots_.size());
+            }
+
+            std::vector<F> compact;
+            compact.reserve(coeffs.size() * poly_size);
+            for (const auto& poly : coeffs) compact.insert(compact.end(), poly.begin(), poly.end());
+
+            out_matrix.resize(total_size);
+            out_leaves.resize(codeword_length);
+            return whir::cuda::gpu_interleaved_rs_encode_blake3_matrix_leaves(
+                reinterpret_cast<const uint64_t*>(compact.data()),
+                reinterpret_cast<uint64_t*>(out_matrix.data()),
+                reinterpret_cast<uint8_t*>(out_leaves.data()),
+                coeffs.size(), poly_size, codeword_length, interleaving_depth);
+        }
+#else
+        (void)coeffs;
+        (void)codeword_length;
+        (void)interleaving_depth;
+        (void)out_matrix;
+        (void)out_leaves;
+#endif
+        return false;
+    }
+
     bool try_gpu_interleaved_rs_encode_to_bytes(
         std::span<const std::span<const F>> coeffs,
         std::size_t codeword_length,
@@ -565,6 +635,55 @@ public:
         return false;
     }
 
+    // 尝试在 GPU 上执行 RS 编码、BLAKE3 leaves 和 BLAKE3 Merkle root。
+    bool try_gpu_interleaved_rs_encode_blake3_merkle_root(
+        std::span<const std::span<const F>> coeffs,
+        std::size_t codeword_length,
+        std::size_t interleaving_depth,
+        std::array<std::uint8_t, 32>& out
+    ) {
+#if defined(WHIR_CUDA) && defined(WHIR_CUDA_EXPERIMENTAL_NTT)
+        if constexpr (std::is_same_v<F, whir::algebra::Goldilocks>) {
+            if (coeffs.empty()) {
+                out = {};
+                return true;
+            }
+            const std::size_t poly_size = coeffs[0].size();
+            const std::size_t rows = coeffs.size() * interleaving_depth;
+            const std::size_t total_size = rows * codeword_length;
+            const std::size_t message_size = rows * sizeof(uint64_t);
+            if (!whir::cuda::gpu_dispatch_enabled() ||
+                total_size < whir::cuda::gpu_ntt_threshold() ||
+                message_size == 0 ||
+                (message_size % 64) != 0 ||
+                message_size > 1024) {
+                return false;
+            }
+
+            ensure_roots_table(codeword_length);
+            auto& pool = whir::cuda::GpuPool::instance();
+            if (pool.roots_len() != roots_.size() ||
+                pool.roots_host() != reinterpret_cast<const uint64_t*>(roots_.data())) {
+                pool.upload_roots(reinterpret_cast<const uint64_t*>(roots_.data()), roots_.size());
+            }
+
+            std::vector<F> compact;
+            compact.reserve(coeffs.size() * poly_size);
+            for (const auto& poly : coeffs) compact.insert(compact.end(), poly.begin(), poly.end());
+
+            return whir::cuda::gpu_interleaved_rs_encode_blake3_merkle_root_async(
+                reinterpret_cast<const uint64_t*>(compact.data()),
+                out.data(), coeffs.size(), poly_size, codeword_length, interleaving_depth);
+        }
+#else
+        (void)coeffs;
+        (void)codeword_length;
+        (void)interleaving_depth;
+        (void)out;
+#endif
+        return false;
+    }
+
     // 不含 1/N 缩放因子的逆 NTT。
     //
     // INTT 定义（不含 1/N）：
@@ -648,6 +767,49 @@ private:
     //   其他  — ntt_recurse（√N 递归分解）
     //
     // 前置条件：values.size() % size == 0，roots.size() % size == 0。
+    void ntt_power_of_two(std::span<F> values, std::span<const F> roots, std::size_t size) {
+        assert(is_power_of_two(size));
+        assert(values.size() % size == 0);
+        assert(roots.size() % size == 0);
+        for (std::size_t off = 0; off + size <= values.size(); off += size) {
+            ntt_power_of_two(std::span<F>{values.data() + off, size}, roots);
+        }
+    }
+
+    void ntt_power_of_two(std::span<F> values, std::span<const F> roots) {
+        const std::size_t n = values.size();
+        assert(is_power_of_two(n));
+        if (n <= 1) return;
+
+        // DIT radix-2 NTT: bit-reverse first so the final values stay in natural order.
+        for (std::size_t i = 1, j = 0; i < n; ++i) {
+            std::size_t bit = n >> 1;
+            for (; (j & bit) != 0; bit >>= 1) {
+                j ^= bit;
+            }
+            j ^= bit;
+            if (i < j) {
+                std::swap(values[i], values[j]);
+            }
+        }
+
+        const std::size_t root_stride = roots.size() / n;
+        for (std::size_t len = 2; len <= n; len <<= 1) {
+            const std::size_t step = root_stride * (n / len);
+            for (std::size_t i = 0; i < n; i += len) {
+                std::size_t root_index = 0;
+                const std::size_t half = len >> 1;
+                for (std::size_t j = 0; j < half; ++j) {
+                    const F u = values[i + j];
+                    const F v = mul_by_root(values[i + j + half], roots[root_index]);
+                    values[i + j] = u + v;
+                    values[i + j + half] = u - v;
+                    root_index += step;
+                }
+            }
+        }
+    }
+
     void ntt_dispatch(std::span<F> values, std::span<const F> roots, std::size_t size) {
         assert(values.size() % size == 0);
         assert(roots.size() % size == 0);

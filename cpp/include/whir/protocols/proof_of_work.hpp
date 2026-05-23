@@ -118,8 +118,10 @@ inline std::uint64_t find_nonce(
                 static_cast<std::uint64_t>(batch) * static_cast<std::uint64_t>(actual_threads);
 
             // 预填充 challenge 字节到每个 batch 槽位
-            std::vector<std::uint8_t> inputs(64 * batch, 0);
-            std::vector<::whir::hash::Hash> outputs(batch);
+            thread_local std::vector<std::uint8_t> inputs;
+            thread_local std::vector<::whir::hash::Hash> outputs;
+            inputs.assign(64 * batch, 0);
+            outputs.resize(batch);
             for (std::size_t i = 0; i < batch; ++i) {
                 std::memcpy(&inputs[64 * i], challenge.data(), 32);
             }
@@ -130,10 +132,7 @@ inline std::uint64_t find_nonce(
                  base += stride) {
                 for (std::size_t i = 0; i < batch; ++i) {
                     const std::uint64_t n = base + static_cast<std::uint64_t>(i);
-                    for (int b = 0; b < 8; ++b) {
-                        inputs[64 * i + 32 + b] =
-                            static_cast<std::uint8_t>((n >> (8 * b)) & 0xFFu);
-                    }
+                    std::memcpy(&inputs[64 * i + 32], &n, sizeof(n));
                 }
 
                 engine.hash_many(64,
@@ -177,9 +176,7 @@ inline std::uint64_t find_nonce(
         // 为本 batch 写入 nonce（LE 编码）
         for (std::size_t i = 0; i < batch; ++i) {
             const std::uint64_t n = base + static_cast<std::uint64_t>(i);
-            for (int b = 0; b < 8; ++b) {
-                inputs[64 * i + 32 + b] = static_cast<std::uint8_t>((n >> (8 * b)) & 0xFFu);
-            }
+            std::memcpy(&inputs[64 * i + 32], &n, sizeof(n));
         }
 
         engine.hash_many(64,

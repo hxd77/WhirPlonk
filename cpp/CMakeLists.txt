@@ -102,6 +102,30 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(WHIR_NATIVE_CPU "Enable native CPU instruction selection for local benchmarks" ON)
+option(WHIR_ENABLE_O3 "Prefer aggressive optimization flags for release builds" ON)
+option(WHIR_ENABLE_LTO "Enable C/C++ link-time optimization when supported" ON)
+option(WHIR_CUDA_PTXAS_INFO "Print CUDA register/spill usage from ptxas" OFF)
+
+if(WHIR_ENABLE_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT WHIR_IPO_SUPPORTED LANGUAGES C CXX)
+    if(WHIR_IPO_SUPPORTED)
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            find_program(WHIR_GCC_AR NAMES gcc-ar)
+            find_program(WHIR_GCC_RANLIB NAMES gcc-ranlib)
+            if(WHIR_GCC_AR AND WHIR_GCC_RANLIB)
+                set(CMAKE_AR "${WHIR_GCC_AR}" CACHE FILEPATH "Archiver for GCC LTO objects" FORCE)
+                set(CMAKE_RANLIB "${WHIR_GCC_RANLIB}" CACHE FILEPATH "Ranlib for GCC LTO objects" FORCE)
+            endif()
+        endif()
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+        message(STATUS "C/C++ LTO enabled for Release builds")
+    else()
+        message(STATUS "C/C++ LTO requested but not supported by this toolchain")
+    endif()
+endif()
+
 
 # ----------------------------------------------------------------------------
 # 本地 CPU 指令集优化
@@ -119,8 +143,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 #
 # 注意：
 #   MSVC 不支持 -march=native，所以这里只对 GNU / Clang 启用。
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+if(WHIR_NATIVE_CPU AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-march=native)
+endif()
+
+if(WHIR_ENABLE_O3 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options($<$<CONFIG:Release>:-O3>)
 endif()
 
 
@@ -223,6 +251,11 @@ if(WHIR_CUDA)
     if(MSVC)
         target_compile_options(whir_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>)
     endif()
+
+    target_compile_options(whir_cuda PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<BOOL:${WHIR_CUDA_PTXAS_INFO}>>:-Xptxas=-v>
+    )
 
     # 如果启用了实验性 CUDA NTT，
     # 则定义 WHIR_CUDA_EXPERIMENTAL_NTT 宏。

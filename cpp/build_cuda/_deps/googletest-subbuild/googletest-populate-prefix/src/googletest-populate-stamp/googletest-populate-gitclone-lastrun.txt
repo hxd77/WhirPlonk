@@ -3,13 +3,13 @@
 # No other meaning or use of this file is supported.
 
 method=git
-command=/usr/bin/cmake;-P;/home/wwj/HXD/cpp/build_cuda/_deps/googletest-subbuild/googletest-populate-prefix/tmp/googletest-populate-gitclone.cmake
-source_dir=/home/wwj/HXD/cpp/build_cuda/_deps/googletest-src
-work_dir=/home/wwj/HXD/cpp/build_cuda/_deps
+command=D:/CMake/bin/cmake.exe;-DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE;-P;C:/Users/dong77/Desktop/WhirPlonk/cpp/build_cuda/_deps/googletest-subbuild/googletest-populate-prefix/tmp/googletest-populate-gitclone.cmake
+source_dir=C:/Users/dong77/Desktop/WhirPlonk/cpp/build_cuda/_deps/googletest-src
+work_dir=C:/Users/dong77/Desktop/WhirPlonk/cpp/build_cuda/_deps
 repository=https://github.com/google/googletest.git
 remote=origin
 init_submodules=TRUE
 recurse_submodules=--recursive
 submodules=
 CMP0097=NEW
-
+      
