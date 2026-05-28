@@ -328,58 +328,6 @@ __device__ __forceinline__ void store_goldilocks_le_element(uint64_t value, uint
     }
 }
 
-__global__ void sha256_hash_goldilocks_rows_kernel(
-    const uint64_t* input, uint8_t* output, uint32_t row_elements, uint32_t count)
-{
-    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const uint32_t message_size = row_elements * 8u;
-    for (uint32_t msg = tid; msg < count; msg += blockDim.x * gridDim.x) {
-        const uint64_t* src = input + static_cast<uint64_t>(msg) * row_elements;
-        uint8_t* dst = output + static_cast<uint64_t>(msg) * 32u;
-        uint32_t state[8] = {
-            0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
-            0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
-        };
-
-        uint32_t full_blocks = row_elements / 8u;
-        for (uint32_t b = 0; b < full_blocks; ++b) {
-            uint8_t block[64];
-            #pragma unroll
-            for (int e = 0; e < 8; ++e) {
-                store_goldilocks_le_element(src[b * 8u + static_cast<uint32_t>(e)], block + e * 8);
-            }
-            sha256_compress(state, block);
-        }
-
-        uint8_t block[64] = {};
-        uint32_t rem_elements = row_elements & 7u;
-        uint32_t rem = rem_elements * 8u;
-        for (uint32_t e = 0; e < rem_elements; ++e) {
-            store_goldilocks_le_element(src[full_blocks * 8u + e], block + e * 8u);
-        }
-        block[rem] = 0x80u;
-        if (rem >= 56u) {
-            sha256_compress(state, block);
-            #pragma unroll
-            for (int i = 0; i < 64; ++i) block[i] = 0;
-        }
-        const uint64_t bit_len = static_cast<uint64_t>(message_size) * 8u;
-        #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            block[63 - i] = static_cast<uint8_t>((bit_len >> (8 * i)) & 0xffu);
-        }
-        sha256_compress(state, block);
-
-        #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            dst[i * 4 + 0] = static_cast<uint8_t>(state[i] >> 24);
-            dst[i * 4 + 1] = static_cast<uint8_t>(state[i] >> 16);
-            dst[i * 4 + 2] = static_cast<uint8_t>(state[i] >> 8);
-            dst[i * 4 + 3] = static_cast<uint8_t>(state[i]);
-        }
-    }
-}
-
 // =============================================================================
 // BLAKE3 批量哈希内核
 // =============================================================================
@@ -558,6 +506,22 @@ __global__ void encode_ext3_to_bytes_kernel(
     }
 }
 
+__global__ void encode_ext2_to_bytes_kernel(
+    const uint64_t* c0, const uint64_t* c1,
+    uint8_t* out, uint32_t count)
+{
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    for (; idx < count; idx += blockDim.x * gridDim.x) {
+        uint8_t* dst = out + static_cast<uint64_t>(idx) * 16u;
+        uint64_t v0 = from_mont(c0[idx]);
+        uint64_t v1 = from_mont(c1[idx]);
+        for (int b = 0; b < 8; ++b) {
+            dst[b + 0] = static_cast<uint8_t>((v0 >> (8 * b)) & 0xFFu);
+            dst[b + 8] = static_cast<uint8_t>((v1 >> (8 * b)) & 0xFFu);
+        }
+    }
+}
+
 __global__ void gather_hashes_kernel(
     const uint8_t* nodes, const uint64_t* node_indices, uint8_t* out, uint32_t count)
 {
@@ -612,6 +576,7 @@ void launch_apply_twiddles(uint64_t* data, const uint64_t* roots,
     CUDA_CHECK(cudaGetLastError());
 }
 
+//在CPU端启动一个CUDA kernel,让GPU去做矩阵转置
 void launch_transpose(const uint64_t* src, uint64_t* dst, uint32_t rows, uint32_t cols,
                       uint32_t batches, cudaStream_t stream) {
     uint32_t total = rows * cols * batches;
@@ -621,6 +586,7 @@ void launch_transpose(const uint64_t* src, uint64_t* dst, uint32_t rows, uint32_
     CUDA_CHECK(cudaGetLastError());
 }
 
+//启动一个CUDA kernel，把原始多项式系数coeffs重新排列/打包到GPU输出矩阵out里
 void launch_pack_rs_coeffs(const uint64_t* coeffs, uint64_t* out,
                            uint32_t poly_size, uint32_t codeword_length,
                            uint32_t interleaving_depth, uint32_t num_polys,
@@ -648,22 +614,6 @@ void launch_sha256_hash_many(const uint8_t* input, uint8_t* output,
     CUDA_CHECK(cudaGetLastError());
 }
 
-void launch_sha256_hash_goldilocks_rows(const uint64_t* input, uint8_t* output,
-                                        uint32_t row_elements, uint32_t count,
-                                        cudaStream_t stream) {
-    static constexpr uint32_t CHUNK = 65536;
-    for (uint32_t base = 0; base < count; base += CHUNK) {
-        const uint32_t chunk = std::min(CHUNK, count - base);
-        uint32_t grid = div_up(chunk, BLOCK);
-        grid = std::min(grid, 256u);
-        sha256_hash_goldilocks_rows_kernel<<<grid, BLOCK, 0, stream>>>(
-            input + static_cast<uint64_t>(base) * row_elements,
-            output + static_cast<uint64_t>(base) * 32u,
-            row_elements, chunk);
-        CUDA_CHECK(cudaGetLastError());
-    }
-}
-
 void launch_blake3_hash_many(const uint8_t* input, uint8_t* output,
                              uint32_t message_size, uint32_t count, cudaStream_t stream) {
     uint32_t grid = div_up(count, BLOCK);
@@ -672,6 +622,8 @@ void launch_blake3_hash_many(const uint8_t* input, uint8_t* output,
     CUDA_CHECK(cudaGetLastError());
 }
 
+//在CPU端分批启动CUDA kernel,让GPU对很多行Goldilocks数据做Blake3哈希，每一行输出32字节哈希值
+//对应commit_leaves
 void launch_blake3_hash_goldilocks_rows(const uint64_t* input, uint8_t* output,
                                         uint32_t row_elements, uint32_t count,
                                         cudaStream_t stream) {
@@ -697,10 +649,20 @@ void launch_gather_hashes(const uint8_t* nodes, const uint64_t* node_indices,
     CUDA_CHECK(cudaGetLastError());
 }
 
+void launch_encode_ext2_to_bytes(const uint64_t* c0, const uint64_t* c1,
+                                  uint8_t* out, uint32_t count,
+                                  cudaStream_t stream) {
+    uint32_t grid = div_up(count, BLOCK);
+    grid = std::min(grid, 4096u);
+    encode_ext2_to_bytes_kernel<<<grid, BLOCK, 0, stream>>>(c0, c1, out, count);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+//启动一个CUDA Kernel ,把GoldilocksExt的三个分量c0/c1/c2编码成字节,写到out
 void launch_encode_ext3_to_bytes(const uint64_t* c0, const uint64_t* c1,
                                   const uint64_t* c2, uint8_t* out, uint32_t count,
                                   cudaStream_t stream) {
-    uint32_t grid = div_up(count, BLOCK);
+    uint32_t grid = div_up(count, BLOCK); //计算grid维度
     grid = std::min(grid, 4096u);
     encode_ext3_to_bytes_kernel<<<grid, BLOCK, 0, stream>>>(c0, c1, c2, out, count);
     CUDA_CHECK(cudaGetLastError());

@@ -159,11 +159,6 @@ __global__ void encode_to_bytes_kernel(
 __global__ void sha256_hash_many_kernel(
     const uint8_t* input, uint8_t* output, uint32_t message_size, uint32_t count);
 
-/// SHA-256 Goldilocks leaf 哈希内核.
-/// 每个 thread 处理转置后矩阵的一行: from_mont(values) -> LE 字节流 -> digest.
-__global__ void sha256_hash_goldilocks_rows_kernel(
-    const uint64_t* input, uint8_t* output, uint32_t row_elements, uint32_t count);
-
 /// BLAKE3 批量哈希内核.
 /// 支持现有 CPU Blake3 fast path 的固定消息大小: message_size 为 64 的倍数且 <= 1024.
 __global__ void blake3_hash_many_kernel(
@@ -183,4 +178,10 @@ __global__ void gather_hashes_kernel(
 /// 每元素 24 字节 = c0(8B) + c1(8B) + c2(8B), 均为 LE
 __global__ void encode_ext3_to_bytes_kernel(
     const uint64_t* c0, const uint64_t* c1, const uint64_t* c2,
+    uint8_t* out, uint32_t count);
+
+/// GoldilocksExt2 编码内核: 两个基域分量分别编码
+/// 每元素 16 字节 = c0(8B) + c1(8B), 均为 LE
+__global__ void encode_ext2_to_bytes_kernel(
+    const uint64_t* c0, const uint64_t* c1,
     uint8_t* out, uint32_t count);

@@ -41,19 +41,47 @@ inline bool cuda_trace_enabled() {
     return cuda_trace_enabled_flag();
 }
 
+inline std::string_view& current_phase_ref() {
+    static std::string_view phase = "none";
+    return phase;
+}
+
+inline std::string_view current_phase() {
+    return current_phase_ref();
+}
+
 inline void print_csv_header_once() {
     static bool printed = false;
     if (!printed) {
-        std::fprintf(stderr, "mode,size,stage,time_ms\n");
+        std::fprintf(stderr, "mode,phase,size,stage,time_ms\n");
         printed = true;
     }
 }
 
+inline bool keep_stage(std::string_view stage) {
+    return stage == "cpu_ntt"
+        || stage == "merkle_leaf_hash"
+        || stage == "gpu_total"
+        || stage == "gpu_blake3_leaves_ntt"
+        || stage == "gpu_blake3_leaves_hash"
+        || stage == "gpu_blake3_ext2_leaves_ntt"
+        || stage == "gpu_blake3_ext2_leaves_hash"
+        || stage == "gpu_blake3_ext3_leaves_ntt"
+        || stage == "gpu_blake3_ext3_leaves_hash"
+        || stage == "commit_total"
+        || stage == "prove_total"
+        || stage == "total_prover";
+}
+
+//把一次性能计时结果按CSV格式打印到stderr
 inline void record(std::string_view mode, std::size_t size, std::string_view stage, double time_ms) {
     if (!csv_enabled()) return;
+    if (!keep_stage(stage)) return;
     print_csv_header_once();
-    std::fprintf(stderr, "%.*s,%zu,%.*s,%.6f\n",
+    const auto phase = current_phase();
+    std::fprintf(stderr, "%.*s,%.*s,%zu,%.*s,%.6f\n",
         static_cast<int>(mode.size()), mode.data(),
+        static_cast<int>(phase.size()), phase.data(),
         size,
         static_cast<int>(stage.size()), stage.data(),
         time_ms);
@@ -63,8 +91,28 @@ inline double ms_since(Clock::time_point start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
 
-class ScopedTimer {
+class PhaseGuard {
 public:
+    explicit PhaseGuard(std::string_view phase)
+        : previous_(current_phase())
+    {
+        current_phase_ref() = phase;
+    }
+
+    ~PhaseGuard() {
+        current_phase_ref() = previous_;
+    }
+
+    PhaseGuard(const PhaseGuard&) = delete;
+    PhaseGuard& operator=(const PhaseGuard&) = delete;
+
+private:
+    std::string_view previous_;
+};
+
+class ScopedTimer { //作用域计时器
+public:
+    //创建时开始计时
     ScopedTimer(std::string_view mode, std::size_t size, std::string_view stage)
         : mode_(mode)
         , stage_(stage)
@@ -72,6 +120,7 @@ public:
         , start_(Clock::now())
     {}
 
+    //调用析构函数时自动结束执行
     ~ScopedTimer() {
         record(mode_, size_, stage_, ms_since(start_));
     }

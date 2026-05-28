@@ -179,17 +179,16 @@ cmake --build cpp/build_cuda --config Release
 
 **仅编译 benchmark 和测试：**
 ```powershell
-cmake --build cpp/build_cuda --config Release --target bench_ntt_compare bench_rs_sha256_leaf_hash_compare bench_merkle_sha256_compare bench_merkle_path_compare bench_rs_sha256_merkle_compare test_cuda_ntt test_cuda_rs_sha256_leaves test_cuda_merkle_sha256 test_cuda_merkle_path test_cuda_irs_commit test_cuda_rs_sha256_merkle test_protocols
+cmake --build cpp/build_cuda --config Release --target bench_ntt_compare bench_rs_encode_compare bench_merkle_sha256_compare bench_merkle_path_compare bench_irs_cuda_compare test_cuda_ntt test_cuda_rs_encode test_cuda_merkle_sha256 test_cuda_merkle_path test_cuda_irs_commit test_protocols
 ```
 
 **运行 CUDA 测试：**
 ```powershell
 ctest --test-dir cpp/build_cuda -R CudaNtt --output-on-failure
-ctest --test-dir cpp/build_cuda -R CudaRsSha256Leaves --output-on-failure
+ctest --test-dir cpp/build_cuda -R CudaRsEncode --output-on-failure
 ctest --test-dir cpp/build_cuda -R CudaMerkleSha256 --output-on-failure
 ctest --test-dir cpp/build_cuda -R CudaMerklePath --output-on-failure
 ctest --test-dir cpp/build_cuda -R CudaIrsCommit --output-on-failure
-ctest --test-dir cpp/build_cuda -R CudaRsSha256Merkle --output-on-failure
 cpp/build_cuda/tests/test_protocols.exe
 ```
 
@@ -198,10 +197,8 @@ cpp/build_cuda/tests/test_protocols.exe
 ```powershell
 cpp/build_cuda/bench_ntt_compare.exe --sizes 1024 4096 65536 1048576 16777216 --runs 3
 cpp/build_cuda/bench_rs_encode_compare.exe --runs 3 --warmups 1
-cpp/build_cuda/bench_rs_sha256_leaf_hash_compare.exe --runs 3 --warmups 1
 cpp/build_cuda/bench_merkle_sha256_compare.exe --runs 3 --warmups 1
 cpp/build_cuda/bench_merkle_path_compare.exe --runs 3 --warmups 1 --queries 32
-cpp/build_cuda/bench_rs_sha256_merkle_compare.exe --runs 3 --warmups 1
 cpp/build_cuda/bench_irs_cuda_compare.exe --runs 3 --warmups 1
 ```
 

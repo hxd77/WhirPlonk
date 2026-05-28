@@ -189,7 +189,7 @@ void commit_leaves(
         encode_into<T>(matrix, std::span<std::uint8_t>{buf});
     }
     {
-        ::whir::profile::ScopedTimer timer("cpu", out.size(), "merkle_leaf_hash");
+        ::whir::profile::ScopedTimer timer("cpu", out.size(), "merkle_leaf_hash"); //hash CPU时间
         engine.hash_many(message_size, std::span<const std::uint8_t>{buf}, out);
     }
 }

@@ -225,15 +225,10 @@ impl<T: TypeInfo + Encodable + Send + Sync> Config<T> {
         // Compute leaf hashes
         let mut leaves = Vec::with_capacity(self.merkle_tree.num_nodes());
         leaves.resize(self.merkle_tree.num_leaves, Hash::default());
-        let t = std::time::Instant::now();
         hash_rows(&*engine, matrix, &mut leaves[..self.num_rows()]);
-        eprintln!("[PROFILE] matrix_commit::hash_rows: {:.1?}", t.elapsed());
 
         // Commit the leaf hashes
-        let t = std::time::Instant::now();
-        let result = self.merkle_tree.commit(prover_state, leaves);
-        eprintln!("[PROFILE] matrix_commit::merkle_tree: {:.1?}", t.elapsed());
-        result
+        self.merkle_tree.commit(prover_state, leaves)
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]
@@ -309,11 +304,24 @@ fn hash_rows<T: Encodable + Send + Sync>(
     matrix: &[T],
     out: &mut [Hash],
 ) {
-    hash_rows_serial(engine, matrix, out);
+    let timer = std::time::Instant::now();
+    hash_rows_inner(engine, matrix, out);
+    record_leaf_hash(out.len(), timer.elapsed());
 }
 
 #[cfg(feature = "parallel")]
 fn hash_rows<T: Encodable + Send + Sync>(
+    engine: &dyn hash::HashEngine,
+    matrix: &[T],
+    out: &mut [Hash],
+) {
+    let timer = std::time::Instant::now(); //hash开始计时
+    hash_rows_inner(engine, matrix, out);
+    record_leaf_hash(out.len(), timer.elapsed()); //hash结束计时
+}
+
+#[cfg(feature = "parallel")]
+fn hash_rows_inner<T: Encodable + Send + Sync>(
     engine: &dyn hash::HashEngine,
     matrix: &[T],
     out: &mut [Hash],
@@ -328,11 +336,27 @@ fn hash_rows<T: Encodable + Send + Sync>(
         let (mat_a, mat_b) = matrix.split_at(split * cols);
         let (out_a, out_b) = out.split_at_mut(split);
         rayon::join(
-            || hash_rows(engine, mat_a, out_a),
-            || hash_rows(engine, mat_b, out_b),
+            || hash_rows_inner(engine, mat_a, out_a),
+            || hash_rows_inner(engine, mat_b, out_b),
         );
     } else {
         hash_rows_serial(engine, matrix, out);
+    }
+}
+
+#[cfg(not(feature = "parallel"))]
+fn hash_rows_inner<T: Encodable + Send + Sync>(
+    engine: &dyn hash::HashEngine,
+    matrix: &[T],
+    out: &mut [Hash],
+) {
+    hash_rows_serial(engine, matrix, out)
+}
+
+//在Rust版本WHIR里记录Merkle leaf hash阶段的耗时
+fn record_leaf_hash(size: usize, elapsed: std::time::Duration) {
+    if crate::profiling::current_phase() != "none" {
+        crate::profiling::record("rust", size, "rust_merkle_leaf_hash", elapsed);
     }
 }
 

@@ -521,27 +521,6 @@ if(WHIR_BUILD_BENCHMARKS)
         target_link_libraries(bench_rs_encode_compare PRIVATE whir_cuda)
     endif()
 
-    # RS encode 按 bytes 维度对比。
-    add_executable(bench_rs_encode_bytes_compare bench/bench_rs_encode_bytes_compare.cpp)
-    target_link_libraries(bench_rs_encode_bytes_compare PRIVATE whir_algebra)
-    if(WHIR_CUDA)
-        target_link_libraries(bench_rs_encode_bytes_compare PRIVATE whir_cuda)
-    endif()
-
-    # RS leaf hash 对比，通常用于 Merkle leaf 哈希性能测试。
-    add_executable(bench_rs_leaf_hash_compare bench/bench_rs_leaf_hash_compare.cpp)
-    target_link_libraries(bench_rs_leaf_hash_compare PRIVATE whir_algebra)
-    if(WHIR_CUDA)
-        target_link_libraries(bench_rs_leaf_hash_compare PRIVATE whir_cuda)
-    endif()
-
-    # SHA-256 版本的 RS leaf hash 对比。
-    add_executable(bench_rs_sha256_leaf_hash_compare bench/bench_rs_sha256_leaf_hash_compare.cpp)
-    target_link_libraries(bench_rs_sha256_leaf_hash_compare PRIVATE whir_algebra)
-    if(WHIR_CUDA)
-        target_link_libraries(bench_rs_sha256_leaf_hash_compare PRIVATE whir_cuda)
-    endif()
-
     # Merkle tree SHA-256 对比 benchmark。
     add_executable(bench_merkle_sha256_compare bench/bench_merkle_sha256_compare.cpp)
     target_link_libraries(bench_merkle_sha256_compare PRIVATE whir_algebra)
@@ -554,13 +533,6 @@ if(WHIR_BUILD_BENCHMARKS)
     target_link_libraries(bench_merkle_path_compare PRIVATE whir_algebra)
     if(WHIR_CUDA)
         target_link_libraries(bench_merkle_path_compare PRIVATE whir_cuda)
-    endif()
-
-    # RS encode + SHA-256 Merkle 组合流程 benchmark。
-    add_executable(bench_rs_sha256_merkle_compare bench/bench_rs_sha256_merkle_compare.cpp)
-    target_link_libraries(bench_rs_sha256_merkle_compare PRIVATE whir_algebra)
-    if(WHIR_CUDA)
-        target_link_libraries(bench_rs_sha256_merkle_compare PRIVATE whir_cuda)
     endif()
 
     # IRS CUDA 对比 benchmark。

@@ -358,9 +358,38 @@ struct Config {
         std::vector<::whir::hash::Hash> leaves;
         bool leaves_ready = false;
         {
+            /*
+            Source 是什么类型？
+            ├─ Goldilocks (基域)
+            │   ├─ GPU 可用 && Blake3 哈希？
+            │   │   └─ try_gpu_interleaved_rs_encode_blake3_matrix_leaves(...)
+            │   │      → GPU 一次性完成：交织编码 + 矩阵叶子哈希
+            │   │      → leaves_ready = true（跳过后续 hash_rows）
+            │   └─ 否则
+            │       └─ CPU: interleaved_rs_encode(engine, vectors, codeword_length, interleaving_depth)
+            │
+            ├─ GoldilocksExt2 (二次扩域)
+            │   └─ CPU: interleaved_rs_encode(goldilocks_ext2_engine(), ...)
+            │
+            ├─ GoldilocksExt3 (三次扩域)
+            │   └─ CPU: interleaved_rs_encode(goldilocks_ext3_engine(), ...)
+            │
+            └─ 其他类型
+                └─ static_assert 编译失败（不支持的域类型）
+            */
             ::whir::profile::ScopedTimer timer("prover", size(), "witness_encoding");
             if constexpr (std::is_same_v<Source, ::whir::algebra::Goldilocks>) {
                 auto& engine = ::whir::algebra::ntt::goldilocks_engine();
+                if (matrix_hash_id == ::whir::hash::ENGINE_ID_BLAKE3 &&
+                    engine.try_gpu_interleaved_rs_encode_blake3_matrix_leaves( //commit阶段
+                        vectors, codeword_length, interleaving_depth, matrix, leaves)) {
+                    leaves_ready = true;
+                } else {
+                    matrix = ::whir::algebra::ntt::interleaved_rs_encode<Source>(
+                        engine, vectors, codeword_length, interleaving_depth);
+                }
+            } else if constexpr (std::is_same_v<Source, ::whir::algebra::GoldilocksExt2>) {
+                auto& engine = ::whir::algebra::ntt::goldilocks_ext2_engine();
                 if (matrix_hash_id == ::whir::hash::ENGINE_ID_BLAKE3 &&
                     engine.try_gpu_interleaved_rs_encode_blake3_matrix_leaves(
                         vectors, codeword_length, interleaving_depth, matrix, leaves)) {
@@ -369,12 +398,16 @@ struct Config {
                     matrix = ::whir::algebra::ntt::interleaved_rs_encode<Source>(
                         engine, vectors, codeword_length, interleaving_depth);
                 }
-            } else if constexpr (std::is_same_v<Source, ::whir::algebra::GoldilocksExt2>) {
-                matrix = ::whir::algebra::ntt::interleaved_rs_encode<Source>(
-                    ::whir::algebra::ntt::goldilocks_ext2_engine(), vectors, codeword_length, interleaving_depth);
             } else if constexpr (std::is_same_v<Source, ::whir::algebra::GoldilocksExt3>) {
-                matrix = ::whir::algebra::ntt::interleaved_rs_encode<Source>(
-                    ::whir::algebra::ntt::goldilocks_ext3_engine(), vectors, codeword_length, interleaving_depth);
+                auto& engine = ::whir::algebra::ntt::goldilocks_ext3_engine();
+                if (matrix_hash_id == ::whir::hash::ENGINE_ID_BLAKE3 &&
+                    engine.try_gpu_interleaved_rs_encode_blake3_matrix_leaves( //prove阶段
+                        vectors, codeword_length, interleaving_depth, matrix, leaves)) {
+                    leaves_ready = true;
+                } else {
+                    matrix = ::whir::algebra::ntt::interleaved_rs_encode<Source>(
+                        engine, vectors, codeword_length, interleaving_depth);
+                }
             } else {
                 static_assert(sizeof(Source) == 0, "IRS commit: unsupported field type");
             }

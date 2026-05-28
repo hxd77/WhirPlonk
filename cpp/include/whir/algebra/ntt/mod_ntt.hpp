@@ -101,7 +101,7 @@ std::vector<F> ark_ntt(
     }
 
     {
-        ::whir::profile::ScopedTimer timer("cpu", total_size, "cpu_ntt");
+        ::whir::profile::ScopedTimer timer("cpu", total_size, "cpu_ntt"); //CPU版NTT计时
         engine.ntt_batch(std::span<F>{result}, codeword_length);
     }
 

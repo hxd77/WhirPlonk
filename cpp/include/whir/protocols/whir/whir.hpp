@@ -305,7 +305,7 @@ struct Config {
         Transcript& prover_state,
         std::span<const std::span<const Source>> vectors) const
     {
-        return initial_committer.commit(prover_state, vectors);
+        return initial_committer.commit(prover_state, vectors); //initial_committer的Source是Goldilocks Target是GoldilocksExt3
     }
 
     // -------------------------------------------------------------------------
@@ -334,7 +334,7 @@ struct Config {
     // 返回: FinalClaim（evaluation_point + RLC 系数）
     // -------------------------------------------------------------------------
     template <typename Transcript>
-    FinalClaim<Target> prove(
+    FinalClaim<Target> prove(  //prover里的round_commit，类型是rc.irs_committer Source和Target都是GoldilocksExt3
         Transcript& prover_state,
         std::span<const std::span<const Source>> vectors,
         std::span<const irs_commit::Witness<Source, Target>> witnesses,

@@ -118,8 +118,6 @@ void launch_pack_rs_coeffs(const uint64_t* coeffs, uint64_t* out,
 void launch_encode_to_bytes(const uint64_t* values, uint8_t* out, uint32_t count, cudaStream_t stream = nullptr);
 void launch_sha256_hash_many(const uint8_t* input, uint8_t* output,
                              uint32_t message_size, uint32_t count, cudaStream_t stream = nullptr);
-void launch_sha256_hash_goldilocks_rows(const uint64_t* input, uint8_t* output,
-                                        uint32_t row_elements, uint32_t count, cudaStream_t stream = nullptr);
 void launch_blake3_hash_many(const uint8_t* input, uint8_t* output,
                              uint32_t message_size, uint32_t count, cudaStream_t stream = nullptr);
 void launch_blake3_hash_goldilocks_rows(const uint64_t* input, uint8_t* output,
@@ -127,6 +125,7 @@ void launch_blake3_hash_goldilocks_rows(const uint64_t* input, uint8_t* output,
 void launch_gather_hashes(const uint8_t* nodes, const uint64_t* node_indices,
                           uint8_t* out, uint32_t count, cudaStream_t stream = nullptr);
 void launch_encode_ext3_to_bytes(const uint64_t* c0, const uint64_t* c1, const uint64_t* c2, uint8_t* out, uint32_t count, cudaStream_t stream = nullptr);
+void launch_encode_ext2_to_bytes(const uint64_t* c0, const uint64_t* c1, uint8_t* out, uint32_t count, cudaStream_t stream = nullptr);
 
 } // namespace whir::cuda
 #else

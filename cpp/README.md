@@ -168,13 +168,9 @@ ctest --test-dir cpp/build --output-on-failure
 |-----------|----------|
 | `test_cuda_ntt` | CUDA NTT 正确性 |
 | `test_cuda_rs_encode` | CUDA RS 编码 |
-| `test_cuda_rs_encode_bytes` | CUDA 字节级 RS 编码 |
-| `test_cuda_rs_leaf_hash` | CUDA 叶哈希 |
-| `test_cuda_rs_sha256_leaves` | CUDA SHA-256 叶哈希 |
 | `test_cuda_merkle_sha256` | CUDA SHA-256 Merkle 树 |
 | `test_cuda_merkle_path` | CUDA Merkle 路径 |
 | `test_cuda_irs_commit` | CUDA IRS 承诺 |
-| `test_cuda_rs_sha256_merkle` | CUDA SHA-256 RS+Merkle |
 
 ## 基准测试
 
@@ -186,12 +182,8 @@ ctest --test-dir cpp/build --output-on-failure
 | `bench_ntt_compare` | NTT CPU vs CUDA 对比 |
 | `bench_rs_encode` | RS 编码性能 |
 | `bench_rs_encode_compare` | RS 编码 CPU vs CUDA 对比 |
-| `bench_rs_encode_bytes_compare` | 字节级 RS 编码对比 |
-| `bench_rs_leaf_hash_compare` | 叶哈希 CPU vs CUDA 对比 |
-| `bench_rs_sha256_leaf_hash_compare` | SHA-256 叶哈希对比 |
 | `bench_merkle_sha256_compare` | SHA-256 Merkle 树对比 |
 | `bench_merkle_path_compare` | Merkle 路径对比 |
-| `bench_rs_sha256_merkle_compare` | RS+SHA-256 Merkle 综合对比 |
 | `bench_irs_cuda_compare` | IRS 承诺 CPU vs CUDA 对比 |
 
 ## 教学演示

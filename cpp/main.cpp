@@ -291,8 +291,8 @@ void print_config(
 //   3. 重复验证 N 次, 报告平均验证时间和哈希计数
 template <typename M>
 void run_pcs(const Args& args) {
-    using Source = typename M::Source;
-    using Target = typename M::Target;
+    using Source = typename M::Source;  //M=Basefield<GoldilocksExt3>,Source=Goldilocks
+    using Target = typename M::Target;  //Target=GoldilocksExt3
     namespace whir_ns = ::whir::protocols::whir;
     namespace tx = ::whir::transcript;
     namespace alg = ::whir::algebra;
@@ -393,26 +393,35 @@ void run_pcs(const Args& args) {
     auto ds = make_rust_cli_domain_separator(params);
     tx::Empty instance;
 
-    auto t0 = Clock::now();
     auto ps = tx::ProverState::from_ds(ds, instance);
-    auto witness = config.commit(ps, vec_spans); //commit截断
-    auto t_commit = Clock::now();
-    ::whir::profile::record("prover", size, "commit_total",
-        std::chrono::duration<double, std::milli>(t_commit - t0).count());
+    auto t0 = Clock::now();
+    Clock::time_point t_commit;
+    auto witness = [&] {
+        ::whir::profile::PhaseGuard phase("commit");
+        auto witness = config.commit(ps, vec_spans); // commit阶段 vec_spans是Source域
+        t_commit = Clock::now();
+        ::whir::profile::record("prover", size, "commit_total",
+            std::chrono::duration<double, std::milli>(t_commit - t0).count());
+        return witness;
+    }();
 
     std::vector<::whir::protocols::irs_commit::Witness<Source, Target>> whir_wits;
     whir_wits.push_back(std::move(witness));
     std::vector<std::span<const Source>> sp2{std::span<const Source>{vector}};
 
-    config.prove(ps,
-        sp2,
-        std::span<const ::whir::protocols::irs_commit::Witness<Source, Target>>{whir_wits},
-        std::move(prove_linear_forms),
-        std::span<const Target>{evaluations}); //prove阶段
+    Clock::time_point t_prove;
+    {
+        ::whir::profile::PhaseGuard phase("prove");
+        config.prove(ps,
+            sp2,
+            std::span<const ::whir::protocols::irs_commit::Witness<Source, Target>>{whir_wits},
+            std::move(prove_linear_forms),
+            std::span<const Target>{evaluations}); // prove阶段
+        t_prove = Clock::now();
+        ::whir::profile::record("prover", size, "prove_total",
+            std::chrono::duration<double, std::milli>(t_prove - t_commit).count());
+    }
     auto proof = std::move(ps).proof();
-    auto t_prove = Clock::now();
-    ::whir::profile::record("prover", size, "prove_total",
-        std::chrono::duration<double, std::milli>(t_prove - t_commit).count());
     ::whir::profile::record("prover", size, "total_prover",
         std::chrono::duration<double, std::milli>(t_prove - t0).count());
 

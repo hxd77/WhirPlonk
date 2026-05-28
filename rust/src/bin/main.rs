@@ -1,13 +1,15 @@
 use std::{borrow::Cow, time::Instant};
 
-use ark_ff::FftField;
+#[cfg(feature = "rs_in_order")]
+use ark_ff::Field;
+use ark_std::rand::distributions::{Distribution, Standard};
 use clap::Parser;
+use sha3::{Digest, Sha3_256, Sha3_512};
 use whir::{
     algebra::{
         embedding::{Basefield, Embedding, Identity},
         fields::{Field128, Field192, Field256, Field64, Field64_2, Field64_3},
         linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
-        MultilinearPoint,
     },
     bits::Bits,
     cmdline_utils::{AvailableFields, AvailableHash},
@@ -15,6 +17,21 @@ use whir::{
     parameters::ProtocolParameters,
     transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
 };
+
+/// 构造与 C++ 端一致的 DomainSeparator（protocol_id = SHA3-512(CBOR:0xBEEF),
+/// session_id = SHA3-256(CBOR:"WHIR_test")）。
+fn make_unified_ds<'a>() -> DomainSeparator<'a, ()> {
+    // protocol_id = SHA3-512([0x19, 0xBE, 0xEF])   — CBOR uint 0xBEEF
+    let mut hasher = Sha3_512::new();
+    hasher.update([0x19, 0xBE, 0xEF]);
+    let protocol_id: [u8; 64] = hasher.finalize().into();
+    // session_id = SHA3-256(CBOR("WHIR_test"))
+    // CBOR: text header 0x69 (9 byte) + b"WHIR_test"
+    let mut hasher = Sha3_256::new();
+    hasher.update([0x69, 0x57, 0x48, 0x49, 0x52, 0x5F, 0x74, 0x65, 0x73, 0x74]);
+    let session_id: [u8; 32] = hasher.finalize().into();
+    DomainSeparator::with_ids(protocol_id, session_id, &())
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -59,6 +76,10 @@ struct Args {
 
     #[arg(long = "zk")]
     zk: bool,
+
+    /// ZK 模式的确定性随机种子（0 表示使用熵源）。
+    #[arg(long = "seed", default_value = "0")]
+    seed: u64,
 }
 
 fn main() {
@@ -68,6 +89,9 @@ fn main() {
 
     // Dispatch on embedding
     if args.zk {
+        #[cfg(not(feature = "rs_in_order"))]
+        panic!("ZK requires --features rs_in_order");
+        #[cfg(feature = "rs_in_order")]
         match field {
             AF::Goldilocks1 => run_whir_zk::<Field64>(&args),
             AF::Goldilocks2 => run_whir_zk::<Field64_2>(&args),
@@ -91,9 +115,9 @@ fn main() {
 #[allow(clippy::too_many_lines)]
 fn run_whir<M>(args: &Args)
 where
+    Standard: Distribution<M::Source> + Distribution<M::Target>,
     M: Embedding + Default,
-    M::Source: FftField,
-    M::Target: FftField + Codec,
+    M::Target: Codec,
 {
     use whir::protocols::whir::Config;
 
@@ -129,9 +153,7 @@ where
 
     let params = Config::<M>::new(1 << num_variables, &whir_params);
 
-    let ds = DomainSeparator::protocol(&params)
-        .session(&format!("Example at {}:{}", file!(), line!()))
-        .instance(&Empty);
+    let ds = make_unified_ds().instance(&Empty);
 
     let mut prover_state = ProverState::new_std(&ds);
 
@@ -143,11 +165,18 @@ where
         println!("WARN: more PoW bits required than specified.");
     }
 
-    let vector = (0..num_coeffs).map(M::Source::from).collect::<Vec<_>>();
+    let vector = (0..num_coeffs)
+        .map(|i| M::Source::from(i as u64))
+        .collect::<Vec<_>>();
 
-    let whir_commit_time = Instant::now();
-    let witness = params.commit(&mut prover_state, &[&vector]);
-    let whir_commit_time = whir_commit_time.elapsed();
+    let (witness, whir_commit_time) = {
+        let _phase = whir::profiling::PhaseGuard::new("commit");
+        let start = Instant::now();
+        let witness = params.commit(&mut prover_state, &[&vector]);
+        let elapsed = start.elapsed();
+        whir::profiling::record("prover", num_coeffs, "commit_total", elapsed);
+        (witness, elapsed)
+    };
 
     // Allocate constraints
     let mut linear_forms: Vec<Box<dyn Evaluate<M>>> = Vec::new();
@@ -158,7 +187,7 @@ where
     // We do these first to benefit from buffer recycling.
     for _ in 0..num_linear_constraints {
         let linear_form = Box::new(Covector {
-            vector: (0..num_coeffs).map(M::Target::from).collect(),
+            vector: (0..num_coeffs).map(|i| M::Target::from(i as u64)).collect(),
         });
         evaluations.push(linear_form.evaluate(params.embedding(), &vector));
         linear_forms.push(linear_form.clone());
@@ -167,24 +196,35 @@ where
 
     // Evaluation constraint
     let points: Vec<_> = (0..num_evaluations)
-        .map(|x| MultilinearPoint(vec![M::Target::from(x as u64); num_variables]))
+        .map(|x| vec![M::Target::from(x as u64); num_variables])
         .collect();
     for point in &points {
-        let linear_form = Box::new(MultilinearExtension::new(point.0.clone()));
+        let linear_form = Box::new(MultilinearExtension::new(point.clone()));
         evaluations.push(linear_form.evaluate(params.embedding(), &vector));
         linear_forms.push(linear_form.clone());
         prove_linear_forms.push(linear_form);
     }
 
-    let whir_prove_time = Instant::now();
-    let _ = params.prove(
-        &mut prover_state,
-        vec![Cow::Borrowed(vector.as_slice())],
-        vec![Cow::Owned(witness)],
-        prove_linear_forms,
-        Cow::Borrowed(evaluations.as_slice()),
+    let whir_prove_time = {
+        let _phase = whir::profiling::PhaseGuard::new("prove");
+        let start = Instant::now();
+        let _ = params.prove(
+            &mut prover_state,
+            vec![Cow::Borrowed(vector.as_slice())],
+            vec![Cow::Owned(witness)],
+            prove_linear_forms,
+            Cow::Borrowed(evaluations.as_slice()),
+        );
+        let elapsed = start.elapsed();
+        whir::profiling::record("prover", num_coeffs, "prove_total", elapsed);
+        elapsed
+    };
+    whir::profiling::record(
+        "prover",
+        num_coeffs,
+        "total_prover",
+        whir_commit_time + whir_prove_time,
     );
-    let whir_prove_time = whir_prove_time.elapsed();
 
     let proof = prover_state.proof();
     println!(
@@ -223,10 +263,12 @@ where
     );
 }
 
+#[cfg(feature = "rs_in_order")]
 #[allow(clippy::too_many_lines)]
 fn run_whir_zk<F>(args: &Args)
 where
-    F: FftField + Codec,
+    Standard: Distribution<F>,
+    F: Field + Codec,
 {
     use whir::protocols::whir_zk::Config;
 
@@ -260,9 +302,7 @@ where
 
     let params = Config::<F>::new(1 << num_variables, &whir_params, 1);
 
-    let ds = DomainSeparator::protocol(&params)
-        .session(&format!("Example at {}:{}", file!(), line!()))
-        .instance(&Empty);
+    let ds = make_unified_ds().instance(&Empty);
 
     let mut prover_state = ProverState::new_std(&ds);
 
@@ -298,28 +338,44 @@ where
 
     // Evaluation constraint
     let points: Vec<_> = (0..num_evaluations)
-        .map(|x| MultilinearPoint(vec![F::from(x as u64); num_variables]))
+        .map(|x| vec![F::from(x as u64); num_variables])
         .collect();
     for point in &points {
-        let linear_form = Box::new(MultilinearExtension::new(point.0.clone()));
+        let linear_form = Box::new(MultilinearExtension::new(point.clone()));
         evaluations.push(linear_form.evaluate(&embedding, &vector));
         linear_forms.push(linear_form.clone());
         prove_linear_forms.push(linear_form);
     }
 
-    let whir_commit_time = Instant::now();
-    let witness = params.commit(&mut prover_state, &[vector.as_slice()]);
-    let whir_commit_time = whir_commit_time.elapsed();
+    let (witness, whir_commit_time) = {
+        let _phase = whir::profiling::PhaseGuard::new("commit");
+        let start = Instant::now();
+        let witness = params.commit(&mut prover_state, &[vector.as_slice()]);
+        let elapsed = start.elapsed();
+        whir::profiling::record("prover", num_coeffs, "commit_total", elapsed);
+        (witness, elapsed)
+    };
 
-    let whir_prove_time = Instant::now();
-    let _ = params.prove(
-        &mut prover_state,
-        vec![Cow::Borrowed(&vector)],
-        witness,
-        prove_linear_forms,
-        Cow::Borrowed(&evaluations),
+    let whir_prove_time = {
+        let _phase = whir::profiling::PhaseGuard::new("prove");
+        let start = Instant::now();
+        let _ = params.prove(
+            &mut prover_state,
+            vec![Cow::Borrowed(&vector)],
+            witness,
+            prove_linear_forms,
+            Cow::Borrowed(&evaluations),
+        );
+        let elapsed = start.elapsed();
+        whir::profiling::record("prover", num_coeffs, "prove_total", elapsed);
+        elapsed
+    };
+    whir::profiling::record(
+        "prover",
+        num_coeffs,
+        "total_prover",
+        whir_commit_time + whir_prove_time,
     );
-    let whir_prove_time = whir_prove_time.elapsed();
 
     let proof = prover_state.proof();
     println!(

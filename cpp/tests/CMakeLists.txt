@@ -110,18 +110,6 @@ if(WHIR_CUDA)
     target_link_libraries(test_cuda_rs_encode PRIVATE whir_algebra whir_cuda GTest::gtest_main)
     gtest_discover_tests(test_cuda_rs_encode)
 
-    add_executable(test_cuda_rs_encode_bytes test_cuda_rs_encode_bytes.cpp)
-    target_link_libraries(test_cuda_rs_encode_bytes PRIVATE whir_algebra whir_cuda GTest::gtest_main)
-    gtest_discover_tests(test_cuda_rs_encode_bytes)
-
-    add_executable(test_cuda_rs_leaf_hash test_cuda_rs_leaf_hash.cpp)
-    target_link_libraries(test_cuda_rs_leaf_hash PRIVATE whir_algebra whir_cuda GTest::gtest_main)
-    gtest_discover_tests(test_cuda_rs_leaf_hash)
-
-    add_executable(test_cuda_rs_sha256_leaves test_cuda_rs_sha256_leaves.cpp)
-    target_link_libraries(test_cuda_rs_sha256_leaves PRIVATE whir_algebra whir_cuda GTest::gtest_main)
-    gtest_discover_tests(test_cuda_rs_sha256_leaves)
-
     add_executable(test_cuda_merkle_sha256 test_cuda_merkle_sha256.cpp)
     target_link_libraries(test_cuda_merkle_sha256 PRIVATE whir_algebra whir_cuda GTest::gtest_main)
     gtest_discover_tests(test_cuda_merkle_sha256)
@@ -134,7 +122,4 @@ if(WHIR_CUDA)
     target_link_libraries(test_cuda_irs_commit PRIVATE whir_algebra whir_cuda GTest::gtest_main)
     gtest_discover_tests(test_cuda_irs_commit)
 
-    add_executable(test_cuda_rs_sha256_merkle test_cuda_rs_sha256_merkle.cpp)
-    target_link_libraries(test_cuda_rs_sha256_merkle PRIVATE whir_algebra whir_cuda GTest::gtest_main)
-    gtest_discover_tests(test_cuda_rs_sha256_merkle)
 endif()
