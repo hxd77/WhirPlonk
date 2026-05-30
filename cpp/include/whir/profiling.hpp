@@ -59,15 +59,18 @@ inline void print_csv_header_once() {
 }
 
 inline bool keep_stage(std::string_view stage) {
-    return stage == "cpu_ntt"
-        || stage == "merkle_leaf_hash"
-        || stage == "gpu_total"
-        || stage == "gpu_blake3_leaves_ntt"
-        || stage == "gpu_blake3_leaves_hash"
-        || stage == "gpu_blake3_ext2_leaves_ntt"
-        || stage == "gpu_blake3_ext2_leaves_hash"
-        || stage == "gpu_blake3_ext3_leaves_ntt"
-        || stage == "gpu_blake3_ext3_leaves_hash"
+    return stage == "witness_encoding"
+        || stage == "witness_compact"
+        || stage == "witness_roots_prepare"
+        || stage == "witness_h2d"
+        || stage == "witness_gpu_alloc"
+        || stage == "witness_rs_encode"
+        || stage == "witness_leaf_hash"
+        || stage == "witness_d2h"
+        || stage == "witness_resize_outputs"
+        || stage == "merkle_leaf_total"
+        || stage == "merkle_build_total"
+        || stage == "ood_evaluation"
         || stage == "commit_total"
         || stage == "prove_total"
         || stage == "total_prover";

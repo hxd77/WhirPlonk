@@ -143,7 +143,7 @@ GoogleTest 文件 `tests/test_cuda_ntt.cpp` 覆盖：
 ### Linux
 
 ```bash
-cmake -S cpp -B cpp/build_cuda -DUSE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_BUILD_TYPE=Release
+cmake -S cpp -B cpp/build_cuda -DWHIR_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_BUILD_TYPE=Release
 cmake --build cpp/build_cuda --config Release
 ```
 
@@ -155,7 +155,7 @@ cmake --build cpp/build_cuda --config Release
 & "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
 
 cmake -S cpp -B cpp\build_cuda -G "NMake Makefiles" `
-  -DUSE_CUDA=ON `
+  -DWHIR_CUDA=ON `
   -DCMAKE_CUDA_ARCHITECTURES=75 `
   -DCMAKE_CUDA_COMPILER="C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" `
   -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler" `
@@ -168,7 +168,7 @@ cmake --build cpp\build_cuda --config Release
 
 **配置：**
 ```powershell
-cmake -S cpp -B cpp/build_cuda -G "NMake Makefiles" -DUSE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75 -DCMAKE_BUILD_TYPE=Release
+cmake -S cpp -B cpp/build_cuda -G "NMake Makefiles" -DWHIR_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75 -DCMAKE_BUILD_TYPE=Release
 ```
 
 **编译全部目标：**
@@ -210,7 +210,7 @@ cpp/build_cuda/bench_irs_cuda_compare.exe --runs 3 --warmups 1
 ### 纯 CPU 构建（不启用 CUDA）
 
 ```bash
-cmake -S cpp -B cpp/build_cpu -DUSE_CUDA=OFF
+cmake -S cpp -B cpp/build_cpu -DWHIR_CUDA=OFF
 cmake --build cpp/build_cpu --config Release
 ```
 
@@ -336,14 +336,13 @@ poly_size  codeword_length  depth  polys  CPU ms     GPU kernel ms  GPU D2H ms  
 CUDA 是可选的：
 
 ```bash
-cmake -S cpp -B cpp/build_cpu -DUSE_CUDA=OFF
-cmake -S cpp -B cpp/build_cuda -DUSE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89
+cmake -S cpp -B cpp/build_cpu -DWHIR_CUDA=OFF
+cmake -S cpp -B cpp/build_cuda -DWHIR_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89
 ```
 
 项目定义的宏：
 
-- `USE_CUDA`：面向用户的别名
-- `WHIR_CUDA`：内部 CUDA 构建开关
+- `WHIR_CUDA`：CUDA 构建开关
 - `WHIR_CUDA_EXPERIMENTAL_NTT`：启用 Goldilocks NTT 调度
 
 如果未启用 CUDA，头文件正常编译，使用 CPU 实现。如果启用了 CUDA 但通过 `WHIR_CUDA_DISABLE=1` 禁用运行时调度，同样使用 CPU 实现。

@@ -61,7 +61,6 @@ cmake --build build --config Release
 | `WHIR_BUILD_TESTS` | `ON` | 构建测试和 golden dump 生成器 |
 | `WHIR_BLAKE3_SIMD` | `ON` | 启用 Blake3 SIMD（SSE4.1/AVX2） |
 | `WHIR_BLAKE3_AVX512` | `OFF` | 启用 Blake3 AVX512 后端 |
-| `USE_CUDA` | `OFF` | `WHIR_CUDA` 的别名 |
 
 示例：关闭 OpenMP 的单线程构建：
 

@@ -482,6 +482,125 @@ __global__ void blake3_hash_goldilocks_rows_kernel(
     }
 }
 
+struct Ext3Dev {
+    uint64_t c0;
+    uint64_t c1;
+    uint64_t c2;
+};
+
+__device__ __forceinline__ Ext3Dev ext3_add(Ext3Dev a, Ext3Dev b) {
+    return {mont_add(a.c0, b.c0), mont_add(a.c1, b.c1), mont_add(a.c2, b.c2)};
+}
+
+__device__ __forceinline__ Ext3Dev ext3_mul(Ext3Dev a, Ext3Dev b) {
+    constexpr uint64_t nr = 2;
+    uint64_t a1b2 = mont_mul(a.c1, b.c2);
+    uint64_t a2b1 = mont_mul(a.c2, b.c1);
+    uint64_t out0 = mont_add(mont_mul(a.c0, b.c0), mont_mul(nr, mont_add(a1b2, a2b1)));
+    uint64_t out1 = mont_add(mont_add(mont_mul(a.c0, b.c1), mont_mul(a.c1, b.c0)),
+                             mont_mul(nr, mont_mul(a.c2, b.c2)));
+    uint64_t out2 = mont_add(mont_add(mont_mul(a.c0, b.c2), mont_mul(a.c1, b.c1)),
+                             mont_mul(a.c2, b.c0));
+    return {out0, out1, out2};
+}
+
+__device__ __forceinline__ Ext3Dev ext3_pow(Ext3Dev base, uint32_t exp) {
+    Ext3Dev result{1, 0, 0};
+    while (exp > 0) {
+        if (exp & 1u) result = ext3_mul(result, base);
+        exp >>= 1;
+        if (exp > 0) base = ext3_mul(base, base);
+    }
+    return result;
+}
+
+template <bool SourceIsExt3>
+__device__ void ood_evaluate_ext3_kernel_impl(
+    const uint64_t* coeff0, const uint64_t* coeff1, const uint64_t* coeff2,
+    const uint64_t* points, uint64_t* out,
+    uint32_t vector_size, uint32_t num_vectors, uint32_t num_points)
+{
+    extern __shared__ uint64_t shared[];
+    uint64_t* part0 = shared;
+    uint64_t* part1 = shared + blockDim.x;
+    uint64_t* part2 = shared + blockDim.x * 2;
+
+    const uint32_t eval = blockIdx.x;
+    if (eval >= num_vectors * num_points) return;
+    const uint32_t point_idx = eval / num_vectors;
+    const uint32_t vector_idx = eval % num_vectors;
+    const uint32_t tid = threadIdx.x;
+    const Ext3Dev point{
+        points[point_idx * 3 + 0],
+        points[point_idx * 3 + 1],
+        points[point_idx * 3 + 2],
+    };
+
+    const uint32_t chunk_size = (vector_size + blockDim.x - 1) / blockDim.x;
+    const uint32_t start = tid * chunk_size;
+    const uint32_t end = min(vector_size, start + chunk_size);
+    Ext3Dev local{0, 0, 0};
+    if (start < end) {
+        const uint64_t vec_off = static_cast<uint64_t>(vector_idx) * vector_size;
+        uint32_t i = end - 1;
+        if constexpr (SourceIsExt3) {
+            local = {coeff0[vec_off + i], coeff1[vec_off + i], coeff2[vec_off + i]};
+            while (i > start) {
+                --i;
+                local = ext3_mul(local, point);
+                local = ext3_add(local, {coeff0[vec_off + i], coeff1[vec_off + i], coeff2[vec_off + i]});
+            }
+        } else {
+            local = {coeff0[vec_off + i], 0, 0};
+            while (i > start) {
+                --i;
+                local = ext3_mul(local, point);
+                local.c0 = mont_add(local.c0, coeff0[vec_off + i]);
+            }
+        }
+        if (start != 0) {
+            local = ext3_mul(local, ext3_pow(point, start));
+        }
+    }
+
+    part0[tid] = local.c0;
+    part1[tid] = local.c1;
+    part2[tid] = local.c2;
+    __syncthreads();
+
+    for (uint32_t stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            part0[tid] = mont_add(part0[tid], part0[tid + stride]);
+            part1[tid] = mont_add(part1[tid], part1[tid + stride]);
+            part2[tid] = mont_add(part2[tid], part2[tid + stride]);
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        out[eval * 3 + 0] = part0[0];
+        out[eval * 3 + 1] = part1[0];
+        out[eval * 3 + 2] = part2[0];
+    }
+}
+
+__global__ void ood_evaluate_ext3_from_base_kernel(
+    const uint64_t* coeff0, const uint64_t* points, uint64_t* out,
+    uint32_t vector_size, uint32_t num_vectors, uint32_t num_points)
+{
+    ood_evaluate_ext3_kernel_impl<false>(
+        coeff0, nullptr, nullptr, points, out, vector_size, num_vectors, num_points);
+}
+
+__global__ void ood_evaluate_ext3_from_ext3_kernel(
+    const uint64_t* coeff0, const uint64_t* coeff1, const uint64_t* coeff2,
+    const uint64_t* points, uint64_t* out,
+    uint32_t vector_size, uint32_t num_vectors, uint32_t num_points)
+{
+    ood_evaluate_ext3_kernel_impl<true>(
+        coeff0, coeff1, coeff2, points, out, vector_size, num_vectors, num_points);
+}
+
 // =============================================================================
 // GoldilocksExt3 编码内核
 //
@@ -638,6 +757,33 @@ void launch_blake3_hash_goldilocks_rows(const uint64_t* input, uint8_t* output,
             row_elements, chunk);
         CUDA_CHECK(cudaGetLastError());
     }
+}
+
+void launch_ood_evaluate_ext3_from_base(const uint64_t* coeff0, const uint64_t* points,
+                                        uint64_t* out, uint32_t vector_size,
+                                        uint32_t num_vectors, uint32_t num_points,
+                                        cudaStream_t stream) {
+    uint32_t total = num_vectors * num_points;
+    if (total == 0) return;
+    uint32_t block = BLOCK;
+    std::size_t shared = static_cast<std::size_t>(block) * 3 * sizeof(uint64_t);
+    ood_evaluate_ext3_from_base_kernel<<<total, block, shared, stream>>>(
+        coeff0, points, out, vector_size, num_vectors, num_points);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_ood_evaluate_ext3_from_ext3(const uint64_t* coeff0, const uint64_t* coeff1,
+                                        const uint64_t* coeff2, const uint64_t* points,
+                                        uint64_t* out, uint32_t vector_size,
+                                        uint32_t num_vectors, uint32_t num_points,
+                                        cudaStream_t stream) {
+    uint32_t total = num_vectors * num_points;
+    if (total == 0) return;
+    uint32_t block = BLOCK;
+    std::size_t shared = static_cast<std::size_t>(block) * 3 * sizeof(uint64_t);
+    ood_evaluate_ext3_from_ext3_kernel<<<total, block, shared, stream>>>(
+        coeff0, coeff1, coeff2, points, out, vector_size, num_vectors, num_points);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_gather_hashes(const uint8_t* nodes, const uint64_t* node_indices,

@@ -36,14 +36,13 @@ redundant_closure_for_method_calls = "allow"
 ark-std = { version = "0.5", features = ["std"] }
 ark-ff = { version = "0.5", features = ["asm", "std"] }
 ark-serialize = "0.5"
-blake3 = { version = "=1.5.5", features = ["digest", "traits-preview"] }
+blake3 = { version = "1.5", features = ["digest", "traits-preview"] }
 sha3 = { version = "0.10.7", features = ["asm", "oid"] }
 clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 spongefish = { git = "https://github.com/arkworks-rs/spongefish", features = ["ark-ff"], rev = "fcc277f8a857fdeeadd7cca92ab08de63b1ff1a1"}
 rayon = { version = "1.10", optional = true }
-itertools = "0.14"
 tracing = { version = "0.1", features = ["attributes"], optional = true }
 hex = "0.4"
 static_assertions = "1.1.0"
@@ -55,7 +54,6 @@ hex-literal = "0.4.1"
 const-oid = "0.9.6"
 arrayvec = "0.7.6"
 derive-where = { version = "1.6.0", features = ["safe"] }
-approx = "0.5.1"
 ordered-float = { version = "5.1.0", features = ["serde"] }
 
 [dev-dependencies]
@@ -74,29 +72,19 @@ default = ["parallel"]
 verifier_panics = []
 parallel = ["dep:rayon"]
 rayon = ["dep:rayon"]
+asm = ["ark-ff/asm"]
 tracing = ["dep:tracing"]
+# Do not permute evaluation pointsin RS
+# This flag is to be removed after whir_zk supports it.
+rs_in_order = []
 
 [[bench]]
 name = "expand_from_coeff"
-path = "../benches/expand_from_coeff.rs"
 harness = false
 
 [[bench]]
 name = "sumcheck"
-path = "../benches/sumcheck.rs"
 harness = false
-
-[[example]]
-name = "dump_rng"
-path = "../examples/dump_rng.rs"
-
-[[example]]
-name = "dump_whir"
-path = "../examples/dump_whir.rs"
-
-[[example]]
-name = "dump_whir_zk"
-path = "../examples/dump_whir_zk.rs"
 
 # Disable untill fixed.
 # [[bench]]

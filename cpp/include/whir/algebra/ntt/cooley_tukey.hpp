@@ -580,22 +580,38 @@ public:
                 message_size == 0 ||
                 (message_size % 64) != 0 ||
                 message_size > 1024) {
+                if (::whir::profile::cuda_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[CUDA] fused_blake3_leaves fallback field=Goldilocks rows=%zu total_size=%zu message_size=%zu threshold=%zu dispatch=%d\n",
+                        rows, total_size, message_size, whir::cuda::gpu_ntt_threshold(),
+                        whir::cuda::gpu_dispatch_enabled() ? 1 : 0);
+                }
                 return false;
             }
 
-            ensure_roots_table(codeword_length);
-            auto& pool = whir::cuda::GpuPool::instance();
-            if (pool.roots_len() != roots_.size() ||
-                pool.roots_host() != reinterpret_cast<const uint64_t*>(roots_.data())) {
-                pool.upload_roots(reinterpret_cast<const uint64_t*>(roots_.data()), roots_.size());
+            //GPU侧确认roots table，判断GPU pool里有没有可复用的roots,必要时CPU->GPU上传roots
+            {
+                ::whir::profile::ScopedTimer timer("cuda", total_size, "witness_roots_prepare");
+                ensure_roots_table(codeword_length);
+                auto& pool = whir::cuda::GpuPool::instance();
+                if (pool.roots_len() != roots_.size() ||
+                    pool.roots_host() != reinterpret_cast<const uint64_t*>(roots_.data())) {
+                    pool.upload_roots(reinterpret_cast<const uint64_t*>(roots_.data()), roots_.size());
+                }
             }
 
-            std::vector<F> compact;
-            compact.reserve(coeffs.size() * poly_size);
-            for (const auto& poly : coeffs) compact.insert(compact.end(), poly.begin(), poly.end());
+            std::vector<F> compact; //在CPU上把输入的多个vectors拼成一个连续的一维数组，方便后面一次性拷贝到GPU
+            {
+                ::whir::profile::ScopedTimer timer("cuda", total_size, "witness_compact");
+                compact.reserve(coeffs.size() * poly_size);
+                for (const auto& poly : coeffs) compact.insert(compact.end(), poly.begin(), poly.end());
+            }
 
-            out_matrix.resize(total_size);
-            out_leaves.resize(codeword_length);
+            {
+                ::whir::profile::ScopedTimer timer("cuda", total_size, "witness_resize_outputs");
+                out_matrix.resize(total_size);
+                out_leaves.resize(codeword_length);
+            }
             return whir::cuda::gpu_interleaved_rs_encode_blake3_matrix_leaves( //跳到gpu_interleaved_encode_blake3_matrix_leaves函数
                 reinterpret_cast<const uint64_t*>(compact.data()),
                 reinterpret_cast<uint64_t*>(out_matrix.data()),
@@ -621,44 +637,62 @@ public:
                 message_size == 0 ||
                 (message_size % 64) != 0 ||
                 message_size > 1024) {
+                if (::whir::profile::cuda_trace_enabled()) { //如果开启了--cuda-trace
+                    std::fprintf(stderr,
+                        "[CUDA] fused_blake3_leaves fallback field=%s rows=%zu total_size=%zu message_size=%zu threshold=%zu dispatch=%d\n",
+                        std::is_same_v<F, whir::algebra::GoldilocksExt2> ? "GoldilocksExt2" : "GoldilocksExt3",
+                        rows, total_size, message_size, whir::cuda::gpu_ntt_threshold(),
+                        whir::cuda::gpu_dispatch_enabled() ? 1 : 0);
+                }
                 return false;
             }
 
-            ensure_roots_table(codeword_length);
             std::vector<whir::algebra::Goldilocks> base_roots;
-            base_roots.reserve(roots_.size());
-            for (const auto& root : roots_) {
-                base_roots.push_back(root.c0());
+            {
+                ::whir::profile::ScopedTimer timer("cuda", total_size, "witness_roots_prepare");
+                ensure_roots_table(codeword_length);
+                base_roots.reserve(roots_.size());
+                for (const auto& root : roots_) {
+                    base_roots.push_back(root.c0());
+                }
+                auto& pool = whir::cuda::GpuPool::instance();
+                pool.upload_roots(reinterpret_cast<const uint64_t*>(base_roots.data()), base_roots.size());
             }
-            auto& pool = whir::cuda::GpuPool::instance();
-            pool.upload_roots(reinterpret_cast<const uint64_t*>(base_roots.data()), base_roots.size());
 
             std::vector<whir::algebra::Goldilocks> compact0;
             std::vector<whir::algebra::Goldilocks> compact1;
-            compact0.reserve(coeffs.size() * poly_size);
-            compact1.reserve(coeffs.size() * poly_size);
             std::vector<whir::algebra::Goldilocks> compact2;
-            if constexpr (std::is_same_v<F, whir::algebra::GoldilocksExt3>) {
-                compact2.reserve(coeffs.size() * poly_size);
-            }
-            for (const auto& poly : coeffs) {
-                for (const auto& x : poly) {
-                    compact0.push_back(x.c0());
-                    compact1.push_back(x.c1());
-                    if constexpr (std::is_same_v<F, whir::algebra::GoldilocksExt3>) {
-                        compact2.push_back(x.c2());
+            {
+                ::whir::profile::ScopedTimer timer("cuda", total_size, "witness_compact");
+                compact0.reserve(coeffs.size() * poly_size);
+                compact1.reserve(coeffs.size() * poly_size);
+                if constexpr (std::is_same_v<F, whir::algebra::GoldilocksExt3>) {
+                    compact2.reserve(coeffs.size() * poly_size);
+                }
+                for (const auto& poly : coeffs) {
+                    for (const auto& x : poly) {
+                        compact0.push_back(x.c0());
+                        compact1.push_back(x.c1());
+                        if constexpr (std::is_same_v<F, whir::algebra::GoldilocksExt3>) {
+                            compact2.push_back(x.c2());
+                        }
                     }
                 }
             }
 
-            std::vector<whir::algebra::Goldilocks> out0(total_size);
-            std::vector<whir::algebra::Goldilocks> out1(total_size);
+            std::vector<whir::algebra::Goldilocks> out0;
+            std::vector<whir::algebra::Goldilocks> out1;
             std::vector<whir::algebra::Goldilocks> out2;
+            out0.resize(total_size);
+            out1.resize(total_size);
             if constexpr (std::is_same_v<F, whir::algebra::GoldilocksExt3>) {
                 out2.resize(total_size);
             }
 
-            out_leaves.resize(codeword_length);
+            {
+                ::whir::profile::ScopedTimer timer("cuda", total_size, "witness_resize_outputs");
+                out_leaves.resize(codeword_length);
+            }
             bool gpu_ok = false;
             //GoldilocksExt2域
             //进入ext2_matrix_leaves函数
@@ -688,12 +722,15 @@ public:
                 return false;
             }
 
-            out_matrix.resize(total_size);
-            for (std::size_t i = 0; i < total_size; ++i) {
-                if constexpr (std::is_same_v<F, whir::algebra::GoldilocksExt2>) {
-                    out_matrix[i] = F{out0[i], out1[i]};
-                } else {
-                    out_matrix[i] = F{out0[i], out1[i], out2[i]};
+            {
+                ::whir::profile::ScopedTimer timer("cuda", total_size, "witness_resize_outputs");
+                out_matrix.resize(total_size);
+                for (std::size_t i = 0; i < total_size; ++i) {
+                    if constexpr (std::is_same_v<F, whir::algebra::GoldilocksExt2>) {
+                        out_matrix[i] = F{out0[i], out1[i]};
+                    } else {
+                        out_matrix[i] = F{out0[i], out1[i], out2[i]};
+                    }
                 }
             }
             return true;

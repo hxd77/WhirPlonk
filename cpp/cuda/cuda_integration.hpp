@@ -28,6 +28,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <span>
 #include <vector>
@@ -484,6 +485,8 @@ inline void gpu_interleaved_rs_encode(const uint64_t* coeffs, uint64_t* out,
 }
 
 struct GpuRsComponentTiming {
+    float h2d_ms = 0.0f;
+    float rs_encode_ms = 0.0f;
     float ntt_ms = 0.0f;
 };
 
@@ -506,11 +509,18 @@ inline uint64_t* gpu_rs_encode_component_to_device(
     uint64_t* d_scratch = pool.temp(total);
     ScopedCudaEvents ev;
 
+    CUDA_CHECK(cudaEventRecord(ev.start()));
     //CPU系数——> GPU d_coeffs
     CUDA_CHECK(cudaMemcpy(d_coeffs, coeffs, coeff_total * sizeof(uint64_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaEventRecord(ev.stop()));
+    CUDA_CHECK(cudaEventSynchronize(ev.stop()));
+    if (component_timing != nullptr) {
+        component_timing->h2d_ms += elapsed_ms(ev.start(), ev.stop());
+    }
+
+    CUDA_CHECK(cudaEventRecord(ev.start()));
     //d_data清零
     CUDA_CHECK(cudaMemset(d_data, 0, total * sizeof(uint64_t)));
-
     //把d_data重新排列到d_coeffs里 ,同时补0
     launch_pack_rs_coeffs(d_coeffs, d_data,
                           static_cast<uint32_t>(poly_size),
@@ -518,8 +528,6 @@ inline uint64_t* gpu_rs_encode_component_to_device(
                           static_cast<uint32_t>(interleaving_depth),
                           static_cast<uint32_t>(num_polys));
 
-    //NTT计时时间
-    CUDA_CHECK(cudaEventRecord(ev.start()));
     //NTT
     uint64_t* result = gpu_ntt_dispatch(
         //d_scratch是临时缓冲区，因为GPU NTT采用ping-pong buffer方式,两个缓冲区来回切换
@@ -527,17 +535,18 @@ inline uint64_t* gpu_rs_encode_component_to_device(
     //如果NTT结果在d_data，那转置结果就写到d_scratch
     //如果NTT结果在d_scratch,那转置结果就写到d_data
     uint64_t* transposed = (result == d_data) ? d_scratch : d_data;
-    CUDA_CHECK(cudaEventRecord(ev.stop()));
-    CUDA_CHECK(cudaEventSynchronize(ev.stop()));
-    if (component_timing != nullptr) {
-        component_timing->ntt_ms += elapsed_ms(ev.start(), ev.stop());
-    }
-
     //转置
     launch_transpose(result, transposed, static_cast<uint32_t>(rows),
                      static_cast<uint32_t>(codeword_length), 1);
 
     CUDA_CHECK(cudaMemcpy(d_component_out, transposed, total * sizeof(uint64_t), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaEventRecord(ev.stop()));
+    CUDA_CHECK(cudaEventSynchronize(ev.stop()));
+    if (component_timing != nullptr) {
+        const float rs_ms = elapsed_ms(ev.start(), ev.stop());
+        component_timing->rs_encode_ms += rs_ms;
+        component_timing->ntt_ms += rs_ms;
+    }
     return d_component_out;
 }
 
@@ -556,15 +565,23 @@ inline bool gpu_interleaved_rs_encode_blake3_matrix_leaves(const uint64_t* coeff
         return false;
     }
 
-    auto& pool = GpuPool::instance();
-    pool.reset_alloc_timing();
-    const std::size_t coeff_total = num_polys * poly_size;
-    const std::size_t total = rows * codeword_length;
-    (void)pool.input(coeff_total);
-    (void)pool.data(total);
-    (void)pool.temp(total);
-    uint64_t* d_matrix = pool.component0(total);
-    uint8_t* d_hashes = pool.hashes(codeword_length * 32);
+    auto& pool = GpuPool::instance(); //获取GPU内存池
+    pool.reset_alloc_timing();      //把上一次显存分配时间清零
+    const std::size_t coeff_total = num_polys * poly_size; //多项式系数
+    const std::size_t total = rows * codeword_length;   //编码后的总元素
+    uint64_t* d_matrix = nullptr;       //GPU上矩阵数据指针
+    uint8_t* d_hashes = nullptr;        //GPU上哈希结果指针
+    {
+        const auto alloc_t0 = std::chrono::steady_clock::now(); //记录当前时间点，作为显存分配开始时间
+        (void)pool.input(coeff_total);              //从内存池申请几块buffer
+        (void)pool.data(total);
+        (void)pool.temp(total);
+        d_matrix = pool.component0(total);  //从GPU内存池里拿一块uint64_t类型的显存，用来存储矩阵
+        d_hashes = pool.hashes(codeword_length * 32);
+        whir::profile::record("cuda", total, "witness_gpu_alloc",
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - alloc_t0).count());
+    }
     auto& timing = last_ntt_timing_value();
     timing = {};
     timing.used_gpu = true;
@@ -575,7 +592,8 @@ inline bool gpu_interleaved_rs_encode_blake3_matrix_leaves(const uint64_t* coeff
     gpu_rs_encode_component_to_device(
         coeffs, d_matrix, num_polys, poly_size, codeword_length, interleaving_depth,
         &component_timing);
-    const float ntt_ms = component_timing.ntt_ms;
+    const float h2d_ms = component_timing.h2d_ms;
+    const float rs_ms = component_timing.rs_encode_ms;
 
     //hash计时开始
     CUDA_CHECK(cudaEventRecord(ev.start()));
@@ -586,7 +604,7 @@ inline bool gpu_interleaved_rs_encode_blake3_matrix_leaves(const uint64_t* coeff
     CUDA_CHECK(cudaEventRecord(ev.stop()));
     CUDA_CHECK(cudaEventSynchronize(ev.stop()));
     const float hash_ms = elapsed_ms(ev.start(), ev.stop());
-    timing.kernel_ms = ntt_ms + hash_ms;
+    timing.kernel_ms = rs_ms + hash_ms;
 
     CUDA_CHECK(cudaEventRecord(ev.start()));
     CUDA_CHECK(cudaMemcpy(out_matrix, d_matrix, total * sizeof(uint64_t), cudaMemcpyDeviceToHost));
@@ -595,8 +613,10 @@ inline bool gpu_interleaved_rs_encode_blake3_matrix_leaves(const uint64_t* coeff
     CUDA_CHECK(cudaEventSynchronize(ev.stop()));
     timing.d2h_ms = elapsed_ms(ev.start(), ev.stop());
     timing.total_ms = timing.kernel_ms + timing.d2h_ms;
-    whir::profile::record("cuda", total, "gpu_blake3_leaves_ntt", ntt_ms);
-    whir::profile::record("cuda", total, "gpu_blake3_leaves_hash", hash_ms);
+    whir::profile::record("cuda", total, "witness_h2d", h2d_ms);
+    whir::profile::record("cuda", total, "witness_rs_encode", rs_ms);
+    whir::profile::record("cuda", total, "witness_leaf_hash", hash_ms);
+    whir::profile::record("cuda", total, "witness_d2h", timing.d2h_ms);
     return true;
 }
 
@@ -621,13 +641,23 @@ inline bool gpu_interleaved_rs_encode_blake3_ext2_matrix_leaves(
     pool.reset_alloc_timing();
     const std::size_t coeff_total = num_polys * poly_size;
     const std::size_t total = rows * codeword_length;
-    (void)pool.input(coeff_total);
-    (void)pool.data(total);
-    (void)pool.temp(total);
-    uint64_t* d_c0 = pool.component0(total);
-    uint64_t* d_c1 = pool.component1(total);
-    uint8_t* d_bytes = pool.bytes(total * 16);
-    uint8_t* d_hashes = pool.hashes(codeword_length * 32);
+    uint64_t* d_c0 = nullptr;
+    uint64_t* d_c1 = nullptr;
+    uint8_t* d_bytes = nullptr;
+    uint8_t* d_hashes = nullptr;
+    {
+        const auto alloc_t0 = std::chrono::steady_clock::now();
+        (void)pool.input(coeff_total);
+        (void)pool.data(total);
+        (void)pool.temp(total);
+        d_c0 = pool.component0(total);
+        d_c1 = pool.component1(total);
+        d_bytes = pool.bytes(total * 16);
+        d_hashes = pool.hashes(codeword_length * 32);
+        whir::profile::record("cuda", total, "witness_gpu_alloc",
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - alloc_t0).count());
+    }
     auto& timing = last_ntt_timing_value();
     timing = {};
     timing.used_gpu = true;
@@ -641,7 +671,8 @@ inline bool gpu_interleaved_rs_encode_blake3_ext2_matrix_leaves(
     gpu_rs_encode_component_to_device(
         coeff1, d_c1, num_polys, poly_size, codeword_length, interleaving_depth,
         &component_timing);
-    const float ntt_ms = component_timing.ntt_ms;
+    const float h2d_ms = component_timing.h2d_ms;
+    const float rs_ms = component_timing.rs_encode_ms;
 
     CUDA_CHECK(cudaEventRecord(ev.start()));
     launch_encode_ext2_to_bytes(d_c0, d_c1, d_bytes, static_cast<uint32_t>(total));
@@ -650,7 +681,7 @@ inline bool gpu_interleaved_rs_encode_blake3_ext2_matrix_leaves(
     CUDA_CHECK(cudaEventRecord(ev.stop()));
     CUDA_CHECK(cudaEventSynchronize(ev.stop()));
     const float hash_ms = elapsed_ms(ev.start(), ev.stop());
-    timing.kernel_ms = ntt_ms + hash_ms;
+    timing.kernel_ms = rs_ms + hash_ms;
 
     CUDA_CHECK(cudaEventRecord(ev.start()));
     CUDA_CHECK(cudaMemcpy(out0, d_c0, total * sizeof(uint64_t), cudaMemcpyDeviceToHost));
@@ -660,8 +691,10 @@ inline bool gpu_interleaved_rs_encode_blake3_ext2_matrix_leaves(
     CUDA_CHECK(cudaEventSynchronize(ev.stop()));
     timing.d2h_ms = elapsed_ms(ev.start(), ev.stop());
     timing.total_ms = timing.kernel_ms + timing.d2h_ms;
-    whir::profile::record("cuda", total, "gpu_blake3_ext2_leaves_ntt", ntt_ms);
-    whir::profile::record("cuda", total, "gpu_blake3_ext2_leaves_hash", hash_ms);
+    whir::profile::record("cuda", total, "witness_h2d", h2d_ms);
+    whir::profile::record("cuda", total, "witness_rs_encode", rs_ms);
+    whir::profile::record("cuda", total, "witness_leaf_hash", hash_ms);
+    whir::profile::record("cuda", total, "witness_d2h", timing.d2h_ms);
     return true;
 }
 
@@ -689,14 +722,25 @@ inline bool gpu_interleaved_rs_encode_blake3_ext3_matrix_leaves(
     pool.reset_alloc_timing();
     const std::size_t coeff_total = num_polys * poly_size;
     const std::size_t total = rows * codeword_length;
-    (void)pool.input(coeff_total);
-    (void)pool.data(total);
-    (void)pool.temp(total);
-    uint64_t* d_c0 = pool.component0(total);
-    uint64_t* d_c1 = pool.component1(total);
-    uint64_t* d_c2 = pool.component2(total);
-    uint8_t* d_bytes = pool.bytes(total * 24);
-    uint8_t* d_hashes = pool.hashes(codeword_length * 32);
+    uint64_t* d_c0 = nullptr;
+    uint64_t* d_c1 = nullptr;
+    uint64_t* d_c2 = nullptr;
+    uint8_t* d_bytes = nullptr;
+    uint8_t* d_hashes = nullptr;
+    {
+        const auto alloc_t0 = std::chrono::steady_clock::now();
+        (void)pool.input(coeff_total);
+        (void)pool.data(total);
+        (void)pool.temp(total);
+        d_c0 = pool.component0(total);
+        d_c1 = pool.component1(total);
+        d_c2 = pool.component2(total);
+        d_bytes = pool.bytes(total * 24);
+        d_hashes = pool.hashes(codeword_length * 32);
+        whir::profile::record("cuda", total, "witness_gpu_alloc",
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - alloc_t0).count());
+    }
     auto& timing = last_ntt_timing_value();
     timing = {};
     timing.used_gpu = true;
@@ -714,7 +758,8 @@ inline bool gpu_interleaved_rs_encode_blake3_ext3_matrix_leaves(
     gpu_rs_encode_component_to_device(
         coeff2, d_c2, num_polys, poly_size, codeword_length, interleaving_depth,
         &component_timing);
-    const float ntt_ms = component_timing.ntt_ms;
+    const float h2d_ms = component_timing.h2d_ms;
+    const float rs_ms = component_timing.rs_encode_ms;
 
     //hash开始计时
     CUDA_CHECK(cudaEventRecord(ev.start()));
@@ -724,7 +769,7 @@ inline bool gpu_interleaved_rs_encode_blake3_ext3_matrix_leaves(
     CUDA_CHECK(cudaEventRecord(ev.stop())); //hash计时结束
     CUDA_CHECK(cudaEventSynchronize(ev.stop()));
     const float hash_ms = elapsed_ms(ev.start(), ev.stop());
-    timing.kernel_ms = ntt_ms + hash_ms;
+    timing.kernel_ms = rs_ms + hash_ms;
 
     CUDA_CHECK(cudaEventRecord(ev.start()));
     CUDA_CHECK(cudaMemcpy(out0, d_c0, total * sizeof(uint64_t), cudaMemcpyDeviceToHost));
@@ -735,11 +780,14 @@ inline bool gpu_interleaved_rs_encode_blake3_ext3_matrix_leaves(
     CUDA_CHECK(cudaEventSynchronize(ev.stop()));
     timing.d2h_ms = elapsed_ms(ev.start(), ev.stop());
     timing.total_ms = timing.kernel_ms + timing.d2h_ms;
-    whir::profile::record("cuda", total, "gpu_blake3_ext3_leaves_ntt", ntt_ms);
-    whir::profile::record("cuda", total, "gpu_blake3_ext3_leaves_hash", hash_ms);
+    whir::profile::record("cuda", total, "witness_h2d", h2d_ms);
+    whir::profile::record("cuda", total, "witness_rs_encode", rs_ms);
+    whir::profile::record("cuda", total, "witness_leaf_hash", hash_ms);
+    whir::profile::record("cuda", total, "witness_d2h", timing.d2h_ms);
     return true;
 }
 
+//计算Merkle 层数
 inline std::size_t merkle_layers_for_size(std::size_t size) noexcept {
     if (size <= 1) return 0;
     std::size_t pow = 1, k = 0;
@@ -779,20 +827,21 @@ inline void gpu_blake3_merkle_tree_device(const uint8_t* d_leaves,
                                           std::size_t num_leaves,
                                           uint8_t* d_nodes,
                                           cudaStream_t stream) {
-    const std::size_t layers = merkle_layers_for_size(num_leaves);
-    const std::size_t leaf_layer_size = std::size_t{1} << layers;
-    const std::size_t num_nodes = (std::size_t{1} << (layers + 1)) - 1;
+    const std::size_t layers = merkle_layers_for_size(num_leaves); //计算层数
+    const std::size_t leaf_layer_size = std::size_t{1} << layers; //计算补齐后的叶子层大小
+    const std::size_t num_nodes = (std::size_t{1} << (layers + 1)) - 1; //计算整颗数节点数量
 
-    CUDA_CHECK(cudaMemsetAsync(d_nodes, 0, num_nodes * 32, stream));
+    CUDA_CHECK(cudaMemsetAsync(d_nodes, 0, num_nodes * 32, stream)); //整颗树清0
     if (num_leaves > 0) {
         CUDA_CHECK(cudaMemcpyAsync(d_nodes, d_leaves, num_leaves * 32,
-                                   cudaMemcpyDeviceToDevice, stream));
+                                   cudaMemcpyDeviceToDevice, stream)); //初始化所有节点,leaf0=hash(row0)...
     }
 
-    std::size_t prev_off = 0;
-    std::size_t prev_len = leaf_layer_size;
-    std::size_t curr_off = leaf_layer_size;
-    while (prev_len > 1) {
+    //初始化偏移量，用于描述当前Merkle树每一层在d_nodes里的位置
+    std::size_t prev_off = 0; //上一层起始位置
+    std::size_t prev_len = leaf_layer_size; //上一层节点数量
+    std::size_t curr_off = leaf_layer_size; //当前要写入的新一层的起始位置
+    while (prev_len > 1) { //循环向上构建Merkle Tree
         const std::size_t curr_len = prev_len / 2;
         launch_blake3_hash_many(d_nodes + prev_off * 32, d_nodes + curr_off * 32,
                                 64, static_cast<uint32_t>(curr_len), stream);
@@ -885,6 +934,61 @@ inline void gpu_sha256_merkle_tree(const uint8_t* leaves,
     timing.total_ms = timing.h2d_ms + timing.kernel_ms + timing.d2h_ms;
 }
 
+/// GPU BLAKE3 Merkle tree build.
+///
+/// 输入 leaves 为 num_leaves 个 32B hash。设备端补齐零 hash 后逐层执行
+/// parent = BLAKE3(left || right)。如果 out_nodes 非空，回传完整 witness nodes,
+/// 否则只回传 root.
+inline void gpu_blake3_merkle_tree(const uint8_t* leaves,
+                                   std::size_t num_leaves,
+                                   uint8_t* out_root,
+                                   uint8_t* out_nodes = nullptr) {
+    const std::size_t layers = merkle_layers_for_size(num_leaves);
+    const std::size_t num_nodes = (std::size_t{1} << (layers + 1)) - 1;
+    auto& pool = GpuPool::instance();
+    uint8_t* d_leaves = pool.hashes(num_leaves * 32);
+    uint8_t* d_nodes = pool.merkle(num_nodes * 32);
+    auto& timing = last_ntt_timing_value();
+    timing = {};
+    timing.used_gpu = true;
+    ScopedCudaEvents ev;
+    ScopedCudaStream stream;
+    cudaStream_t s = stream.get();
+
+    CUDA_CHECK(cudaEventRecord(ev.start(), s));
+    if (num_leaves > 0) {
+        CUDA_CHECK(cudaMemcpyAsync(d_leaves, leaves, num_leaves * 32,
+                                   cudaMemcpyHostToDevice, s));
+    }
+    CUDA_CHECK(cudaEventRecord(ev.stop(), s));
+    CUDA_CHECK(cudaEventSynchronize(ev.stop()));
+    timing.h2d_ms = elapsed_ms(ev.start(), ev.stop());
+
+    //GPU blake3 hash计时
+    CUDA_CHECK(cudaEventRecord(ev.start(), s));
+    gpu_blake3_merkle_tree_device(d_leaves, num_leaves, d_nodes, s);
+    CUDA_CHECK(cudaEventRecord(ev.stop(), s));
+    CUDA_CHECK(cudaEventSynchronize(ev.stop()));
+    timing.kernel_ms = elapsed_ms(ev.start(), ev.stop());
+
+    CUDA_CHECK(cudaEventRecord(ev.start(), s));
+    if (out_nodes != nullptr) {
+        CUDA_CHECK(cudaMemcpyAsync(out_nodes, d_nodes, num_nodes * 32,
+                                   cudaMemcpyDeviceToHost, s));
+    } else {
+        CUDA_CHECK(cudaMemcpyAsync(out_root, d_nodes + (num_nodes - 1) * 32,
+                                   32, cudaMemcpyDeviceToHost, s));
+    }
+    CUDA_CHECK(cudaEventRecord(ev.stop(), s));
+    CUDA_CHECK(cudaEventSynchronize(ev.stop()));
+    if (out_nodes != nullptr && out_root != nullptr) {
+        std::copy(out_nodes + (num_nodes - 1) * 32, out_nodes + num_nodes * 32, out_root);
+    }
+    timing.d2h_ms = elapsed_ms(ev.start(), ev.stop());
+    timing.total_ms = timing.h2d_ms + timing.kernel_ms + timing.d2h_ms;
+    whir::profile::record("cuda", num_leaves, "gpu_blake3_merkle_tree", timing.kernel_ms);
+}
+
 /// GPU SHA-256 Merkle tree open path.
 ///
 /// 构建 device Merkle tree，但只回传 root 和按 CPU open_path 顺序排列的 sibling hints.
@@ -935,6 +1039,169 @@ inline void gpu_sha256_merkle_open_path(const uint8_t* leaves,
     CUDA_CHECK(cudaEventSynchronize(ev.stop()));
     timing.d2h_ms = elapsed_ms(ev.start(), ev.stop());
     timing.total_ms = timing.h2d_ms + timing.kernel_ms + timing.d2h_ms;
+}
+
+/// GPU BLAKE3 Merkle tree open path.
+///
+/// 构建设备端 Merkle tree，但只回传 root 和按 CPU open_path 顺序排列的 sibling hints.
+inline void gpu_blake3_merkle_open_path(const uint8_t* leaves,
+                                        std::size_t num_leaves,
+                                        std::span<const std::size_t> indices,
+                                        uint8_t* out_root,
+                                        uint8_t* out_hints) {
+    const std::size_t layers = merkle_layers_for_size(num_leaves);
+    const std::size_t num_nodes = (std::size_t{1} << (layers + 1)) - 1;
+    std::vector<uint64_t> hint_nodes = merkle_hint_node_indices(num_leaves, indices);
+    auto& pool = GpuPool::instance();
+    uint8_t* d_leaves = pool.hashes(num_leaves * 32);
+    uint8_t* d_nodes = pool.merkle(num_nodes * 32);
+    uint64_t* d_hint_nodes = pool.input(hint_nodes.size());
+    uint8_t* d_hints = pool.bytes(hint_nodes.size() * 32);
+    auto& timing = last_ntt_timing_value();
+    timing = {};
+    timing.used_gpu = true;
+    ScopedCudaEvents ev;
+    ScopedCudaStream stream;
+    cudaStream_t s = stream.get();
+
+    CUDA_CHECK(cudaEventRecord(ev.start(), s));
+    if (num_leaves > 0) {
+        CUDA_CHECK(cudaMemcpyAsync(d_leaves, leaves, num_leaves * 32,
+                                   cudaMemcpyHostToDevice, s));
+    }
+    if (!hint_nodes.empty()) {
+        CUDA_CHECK(cudaMemcpyAsync(d_hint_nodes, hint_nodes.data(),
+                                   hint_nodes.size() * sizeof(uint64_t),
+                                   cudaMemcpyHostToDevice, s));
+    }
+    CUDA_CHECK(cudaEventRecord(ev.stop(), s));
+    CUDA_CHECK(cudaEventSynchronize(ev.stop()));
+    timing.h2d_ms = elapsed_ms(ev.start(), ev.stop());
+
+    CUDA_CHECK(cudaEventRecord(ev.start(), s));
+    gpu_blake3_merkle_tree_device(d_leaves, num_leaves, d_nodes, s);
+    launch_gather_hashes(d_nodes, d_hint_nodes, d_hints,
+                         static_cast<uint32_t>(hint_nodes.size()), s);
+    CUDA_CHECK(cudaEventRecord(ev.stop(), s));
+    CUDA_CHECK(cudaEventSynchronize(ev.stop()));
+    timing.kernel_ms = elapsed_ms(ev.start(), ev.stop());
+
+    CUDA_CHECK(cudaEventRecord(ev.start(), s));
+    CUDA_CHECK(cudaMemcpyAsync(out_root, d_nodes + (num_nodes - 1) * 32,
+                               32, cudaMemcpyDeviceToHost, s));
+    if (!hint_nodes.empty()) {
+        CUDA_CHECK(cudaMemcpyAsync(out_hints, d_hints, hint_nodes.size() * 32,
+                                   cudaMemcpyDeviceToHost, s));
+    }
+    CUDA_CHECK(cudaEventRecord(ev.stop(), s));
+    CUDA_CHECK(cudaEventSynchronize(ev.stop()));
+    timing.d2h_ms = elapsed_ms(ev.start(), ev.stop());
+    timing.total_ms = timing.h2d_ms + timing.kernel_ms + timing.d2h_ms;
+}
+
+//把Goldilocks系数多项式上传到GPU，然后在GPU上计算这些多项式在多个GoldilocksExt3扩域点上的OOD求值，再把结果从GPU拷回CPU
+inline bool gpu_ood_evaluate_ext3_from_base(const uint64_t* coeff0,
+                                            const uint64_t* points,
+                                            uint64_t* out,
+                                            std::size_t num_vectors,
+                                            std::size_t vector_size,
+                                            std::size_t num_points) {
+    if (!gpu_dispatch_enabled() || num_vectors == 0 || vector_size == 0 || num_points == 0) {
+        return false;
+    }
+    if (num_vectors > std::numeric_limits<uint32_t>::max() ||
+        vector_size > std::numeric_limits<uint32_t>::max() ||
+        num_points > std::numeric_limits<uint32_t>::max()) { //不能超过输入/输出数组大小
+        return false;
+    }
+
+    const std::size_t coeff_count = num_vectors * vector_size; //多项式系数组
+    const std::size_t out_count = num_vectors * num_points * 3; //输出数组
+    auto& pool = GpuPool::instance();
+    uint64_t* d_coeff0 = pool.component0(coeff_count); //gpu上保存多项式系数,对应cpu端的coeff0
+    uint64_t* d_points = pool.data(num_points * 3); //gpu上保存OOD点
+    uint64_t* d_out = reinterpret_cast<uint64_t*>(pool.bytes(out_count * sizeof(uint64_t))); //gpu上保存输出结果
+    auto& timing = last_ntt_timing_value();
+    timing = {};
+    timing.used_gpu = true;
+    ScopedCudaEvents ev;      //创建CUDA event,用来测GPU kernel耗时
+    ScopedCudaStream stream; //创建CUDA stream GPU任务队列
+    cudaStream_t s = stream.get();
+
+    CUDA_CHECK(cudaMemcpyAsync(d_coeff0, coeff0, coeff_count * sizeof(uint64_t), //系数CPU传到GPU
+                               cudaMemcpyHostToDevice, s));
+    CUDA_CHECK(cudaMemcpyAsync(d_points, points, num_points * 3 * sizeof(uint64_t), //OOD点从CPU传到GPU
+                               cudaMemcpyHostToDevice, s));
+
+    CUDA_CHECK(cudaEventRecord(ev.start(), s));
+    launch_ood_evaluate_ext3_from_base( //计算OOD点在vector上的求值
+        d_coeff0, d_points, d_out, static_cast<uint32_t>(vector_size),
+        static_cast<uint32_t>(num_vectors), static_cast<uint32_t>(num_points), s);
+    CUDA_CHECK(cudaEventRecord(ev.stop(), s));
+    CUDA_CHECK(cudaEventSynchronize(ev.stop()));
+    timing.kernel_ms = elapsed_ms(ev.start(), ev.stop());
+
+    CUDA_CHECK(cudaMemcpyAsync(out, d_out, out_count * sizeof(uint64_t),
+                               cudaMemcpyDeviceToHost, s));
+    CUDA_CHECK(cudaStreamSynchronize(s));
+    whir::profile::record("cuda", vector_size, "gpu_ood_evaluation_compute", timing.kernel_ms);
+    return true;
+}
+
+inline bool gpu_ood_evaluate_ext3_from_ext3(const uint64_t* coeff0,
+                                            const uint64_t* coeff1,
+                                            const uint64_t* coeff2,
+                                            const uint64_t* points,
+                                            uint64_t* out,
+                                            std::size_t num_vectors,
+                                            std::size_t vector_size,
+                                            std::size_t num_points) {
+    if (!gpu_dispatch_enabled() || num_vectors == 0 || vector_size == 0 || num_points == 0) {
+        return false;
+    }
+    if (num_vectors > std::numeric_limits<uint32_t>::max() ||
+        vector_size > std::numeric_limits<uint32_t>::max() ||
+        num_points > std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+
+    const std::size_t coeff_count = num_vectors * vector_size;
+    const std::size_t out_count = num_vectors * num_points * 3;
+    auto& pool = GpuPool::instance();
+    uint64_t* d_coeff0 = pool.component0(coeff_count);
+    uint64_t* d_coeff1 = pool.component1(coeff_count);
+    uint64_t* d_coeff2 = pool.component2(coeff_count);
+    uint64_t* d_points = pool.data(num_points * 3);
+    uint64_t* d_out = reinterpret_cast<uint64_t*>(pool.bytes(out_count * sizeof(uint64_t)));
+    auto& timing = last_ntt_timing_value();
+    timing = {};
+    timing.used_gpu = true;
+    ScopedCudaEvents ev;
+    ScopedCudaStream stream;
+    cudaStream_t s = stream.get();
+
+    CUDA_CHECK(cudaMemcpyAsync(d_coeff0, coeff0, coeff_count * sizeof(uint64_t),
+                               cudaMemcpyHostToDevice, s));
+    CUDA_CHECK(cudaMemcpyAsync(d_coeff1, coeff1, coeff_count * sizeof(uint64_t),
+                               cudaMemcpyHostToDevice, s));
+    CUDA_CHECK(cudaMemcpyAsync(d_coeff2, coeff2, coeff_count * sizeof(uint64_t),
+                               cudaMemcpyHostToDevice, s));
+    CUDA_CHECK(cudaMemcpyAsync(d_points, points, num_points * 3 * sizeof(uint64_t),
+                               cudaMemcpyHostToDevice, s));
+
+    CUDA_CHECK(cudaEventRecord(ev.start(), s));
+    launch_ood_evaluate_ext3_from_ext3(
+        d_coeff0, d_coeff1, d_coeff2, d_points, d_out, static_cast<uint32_t>(vector_size),
+        static_cast<uint32_t>(num_vectors), static_cast<uint32_t>(num_points), s);
+    CUDA_CHECK(cudaEventRecord(ev.stop(), s));
+    CUDA_CHECK(cudaEventSynchronize(ev.stop()));
+    timing.kernel_ms = elapsed_ms(ev.start(), ev.stop());
+
+    CUDA_CHECK(cudaMemcpyAsync(out, d_out, out_count * sizeof(uint64_t),
+                               cudaMemcpyDeviceToHost, s));
+    CUDA_CHECK(cudaStreamSynchronize(s));
+    whir::profile::record("cuda", vector_size, "gpu_ood_evaluation_compute", timing.kernel_ms);
+    return true;
 }
 
 /// GPU 域元素编码: 每个 uint64_t (Montgomery) → 8 LE 字节

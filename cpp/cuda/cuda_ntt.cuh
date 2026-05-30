@@ -169,6 +169,17 @@ __global__ void blake3_hash_many_kernel(
 __global__ void blake3_hash_goldilocks_rows_kernel(
     const uint64_t* input, uint8_t* output, uint32_t row_elements, uint32_t count);
 
+/// Goldilocks/GoldilocksExt3 OOD Horner 求值内核。
+/// 每个 block 计算一个 (ood_point, vector) 的扩域求值。
+__global__ void ood_evaluate_ext3_from_base_kernel(
+    const uint64_t* coeff0, const uint64_t* points, uint64_t* out,
+    uint32_t vector_size, uint32_t num_vectors, uint32_t num_points);
+
+__global__ void ood_evaluate_ext3_from_ext3_kernel(
+    const uint64_t* coeff0, const uint64_t* coeff1, const uint64_t* coeff2,
+    const uint64_t* points, uint64_t* out,
+    uint32_t vector_size, uint32_t num_vectors, uint32_t num_points);
+
 /// 指定 Merkle node index 的 32B hash gather 内核.
 /// 每个 thread 复制一个 hash: out[i] = nodes[node_indices[i]].
 __global__ void gather_hashes_kernel(

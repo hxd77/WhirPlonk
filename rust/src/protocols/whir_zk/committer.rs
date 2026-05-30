@@ -1,4 +1,5 @@
-use ark_ff::FftField;
+use ark_ff::Field;
+use ark_std::rand::{distributions::Standard, prelude::Distribution};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
@@ -13,7 +14,7 @@ use crate::{
 
 /// zkWHIR commitment: one Merkle root per masked polynomial plus one for blinding.
 #[derive(Debug)]
-pub struct Commitment<F: FftField> {
+pub struct Commitment<F: Field> {
     pub f_hat: Vec<whir::Commitment<F>>,
     pub blinding: whir::Commitment<F>,
 }
@@ -23,7 +24,7 @@ pub struct Commitment<F: FftField> {
 /// Contains the masked polynomial witnesses, their coefficient vectors,
 /// the blinding polynomial family, and the single blinding commitment witness.
 #[derive(Clone, Debug)]
-pub struct Witness<F: FftField> {
+pub struct Witness<F: Field> {
     pub f_hat_vectors: Vec<Vec<F>>,
     pub f_hat_witnesses: Vec<irs_commit::Witness<F, F>>,
     pub blinding_polynomials: Vec<BlindingPolynomials<F>>,
@@ -31,7 +32,7 @@ pub struct Witness<F: FftField> {
     pub blinding_witness: irs_commit::Witness<F, F>,
 }
 
-impl<F: FftField> Config<F> {
+impl<F: Field> Config<F> {
     /// Commit to one or more polynomials with zero-knowledge blinding.
     ///
     /// For each polynomial, samples fresh blinding coefficients from the
@@ -45,6 +46,7 @@ impl<F: FftField> Config<F> {
         polynomials: &[&[F]],
     ) -> Witness<F>
     where
+        Standard: Distribution<F>,
         H: DuplexSpongeInterface,
         R: ark_std::rand::RngCore + ark_std::rand::CryptoRng,
         F: Codec<[H::U]>,
@@ -78,71 +80,6 @@ impl<F: FftField> Config<F> {
                 0,
                 "witness size must be multiple of blinding mask size"
             );
-            let f_hat_vec = poly
-                .iter()
-                .zip(mask.iter().cycle())
-                .map(|(&coeff, &m)| coeff + m)
-                .collect::<Vec<_>>();
-            let witness = self
-                .blinded_commitment
-                .commit(prover_state, &[f_hat_vec.as_slice()]);
-            f_hat_vectors.push(f_hat_vec);
-            f_hat_witnesses.push(witness);
-            blinding_polynomials.push(blinding);
-        }
-
-        self.commit_blinding_vectors(
-            prover_state,
-            polynomials.len(),
-            f_hat_vectors,
-            f_hat_witnesses,
-            blinding_polynomials,
-        )
-    }
-
-    /// Commit with an explicit deterministic RNG for cross-language golden tests.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    pub fn commit_with_rng<H, R, Z>(
-        &self,
-        prover_state: &mut ProverState<H, R>,
-        polynomials: &[&[F]],
-        rng: &mut Z,
-    ) -> Witness<F>
-    where
-        H: DuplexSpongeInterface,
-        R: ark_std::rand::RngCore + ark_std::rand::CryptoRng,
-        Z: ark_std::rand::RngCore + ark_std::rand::CryptoRng,
-        F: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
-    {
-        assert_eq!(
-            self.blinded_commitment.initial_committer.num_vectors, 1,
-            "zkWHIR currently expects one vector per commitment"
-        );
-
-        let mut f_hat_vectors = Vec::with_capacity(polynomials.len());
-        let mut f_hat_witnesses = Vec::with_capacity(polynomials.len());
-        let mut blinding_polynomials = Vec::with_capacity(polynomials.len());
-        let num_blinding_variables = self.num_blinding_variables();
-        let num_witness_variables = self.num_witness_variables();
-        for &poly in polynomials {
-            let blinding = BlindingPolynomials::sample_from_u64_rng(
-                rng,
-                num_blinding_variables,
-                num_witness_variables,
-            );
-            let mask = &blinding.m_poly;
-            let witness_size = self.blinded_commitment.initial_size();
-            assert!(!mask.is_empty(), "blinding mask vector must be non-empty");
-            assert!(
-                witness_size >= mask.len(),
-                "witness vector smaller than blinding mask vector"
-            );
-            assert_eq!(
-                witness_size % mask.len(),
-                0,
-                "witness size must be multiple of blinding mask size"
-            );
             // Safe to .cycle() because witness_size % mask.len() == 0 (asserted above).
             let f_hat_vec = poly
                 .iter()
@@ -157,34 +94,10 @@ impl<F: FftField> Config<F> {
             blinding_polynomials.push(blinding);
         }
 
-        self.commit_blinding_vectors(
-            prover_state,
-            polynomials.len(),
-            f_hat_vectors,
-            f_hat_witnesses,
-            blinding_polynomials,
-        )
-    }
-
-    fn commit_blinding_vectors<H, R>(
-        &self,
-        prover_state: &mut ProverState<H, R>,
-        num_polynomials: usize,
-        f_hat_vectors: Vec<Vec<F>>,
-        f_hat_witnesses: Vec<irs_commit::Witness<F, F>>,
-        blinding_polynomials: Vec<BlindingPolynomials<F>>,
-    ) -> Witness<F>
-    where
-        H: DuplexSpongeInterface,
-        R: ark_std::rand::RngCore + ark_std::rand::CryptoRng,
-        F: Codec<[H::U]>,
-        Hash: ProverMessage<[H::U]>,
-    {
-        let num_witness_variables = self.num_witness_variables();
         let blinding_num_vectors = self.blinding_commitment.initial_committer.num_vectors;
         assert_eq!(
             blinding_num_vectors,
-            num_polynomials * (num_witness_variables + 1),
+            polynomials.len() * (num_witness_variables + 1),
             "blinding commitment layout mismatch: expected n*(mu+1) vectors"
         );
         let mut blinding_vectors = Vec::with_capacity(blinding_num_vectors);

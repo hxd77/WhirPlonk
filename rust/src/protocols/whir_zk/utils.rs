@@ -70,42 +70,6 @@ impl<F: Field> BlindingPolynomials<F> {
         Self { m_poly, g_hats }
     }
 
-    /// Cross-language deterministic sampler.
-    ///
-    /// This intentionally mirrors the current C++ `F::random(rng)` convention:
-    /// consume one little-endian `u64` per field element and map it with
-    /// `F::from(u64)`. Use this only for golden tests and reproducible
-    /// cross-language traces; production ZK sampling should use [`Self::sample`].
-    pub fn sample_from_u64_rng<R: RngCore>(
-        rng: &mut R,
-        num_blinding_variables: usize,
-        num_witness_variables: usize,
-    ) -> Self {
-        let half_size = 1usize << num_blinding_variables;
-
-        let mut msk = Vec::with_capacity(half_size);
-        let mut g0_hat = Vec::with_capacity(half_size);
-        for _ in 0..half_size {
-            msk.push(F::from(rng.next_u64()));
-            g0_hat.push(F::from(rng.next_u64()));
-        }
-
-        let m_poly: Vec<_> = g0_hat
-            .iter()
-            .zip(&msk)
-            .flat_map(|(&g, &m)| [g, m])
-            .collect();
-        let g_hats = (0..num_witness_variables)
-            .map(|_| {
-                (0..half_size)
-                    .map(|_| F::from(rng.next_u64()))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-
-        Self { m_poly, g_hats }
-    }
-
     /// Build committed vectors `[M, ĝ_1^emb, ..., ĝ_mu^emb]` on `ell+1` variables.
     ///
     /// This matches the blinding WHIR commitment layout used by prover and verifier.

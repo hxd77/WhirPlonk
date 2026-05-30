@@ -2,19 +2,26 @@ pub mod embedding;
 pub mod fields;
 pub mod linear_form;
 mod multilinear;
-mod multilinear_point;
 pub mod ntt;
 pub mod sumcheck;
 
 use ark_ff::{AdditiveGroup, Field};
-pub use multilinear::{eval_eq, mixed_multilinear_extend, multilinear_extend};
-pub use multilinear_point::MultilinearPoint;
+use ark_std::rand::{distributions::Standard, prelude::Distribution, Rng};
+pub use multilinear::{eq_weights, eval_eq, mixed_multilinear_extend, multilinear_extend};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 use self::embedding::Embedding;
 #[cfg(feature = "parallel")]
 use crate::utils::workload_size;
+use crate::utils::zip_strict;
+
+pub fn random_vector<F: Field>(mut rng: impl Rng, length: usize) -> Vec<F>
+where
+    Standard: Distribution<F>,
+{
+    (0..length).map(|_| rng.gen()).collect::<Vec<F>>()
+}
 
 pub fn geometric_sequence<F: Field>(base: F, length: usize) -> Vec<F> {
     let mut result = Vec::with_capacity(length);
@@ -49,6 +56,21 @@ pub fn lift<M: Embedding>(embedding: &M, source: &[M::Source]) -> Vec<M::Target>
     let result = source.par_iter().map(|c| embedding.map(*c)).collect();
 
     result
+}
+
+pub fn scalar_mul<F: Field>(vector: &mut [F], weight: F) {
+    for value in vector.iter_mut() {
+        *value *= weight;
+    }
+}
+
+/// Scalar mul add into new vector.
+///
+/// Returns r such that r[i] = a[i] + c · b[i].
+pub fn scalar_mul_add_new<F: Field>(a: &[F], c: F, b: &[F]) -> Vec<F> {
+    zip_strict(a.iter(), b.iter())
+        .map(|(a, b)| *a + c * *b)
+        .collect::<Vec<F>>()
 }
 
 pub fn scalar_mul_add<F: Field>(accumulator: &mut [F], weight: F, vector: &[F]) {

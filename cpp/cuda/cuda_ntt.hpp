@@ -126,6 +126,15 @@ void launch_gather_hashes(const uint8_t* nodes, const uint64_t* node_indices,
                           uint8_t* out, uint32_t count, cudaStream_t stream = nullptr);
 void launch_encode_ext3_to_bytes(const uint64_t* c0, const uint64_t* c1, const uint64_t* c2, uint8_t* out, uint32_t count, cudaStream_t stream = nullptr);
 void launch_encode_ext2_to_bytes(const uint64_t* c0, const uint64_t* c1, uint8_t* out, uint32_t count, cudaStream_t stream = nullptr);
+void launch_ood_evaluate_ext3_from_base(const uint64_t* coeff0, const uint64_t* points,
+                                        uint64_t* out, uint32_t vector_size,
+                                        uint32_t num_vectors, uint32_t num_points,
+                                        cudaStream_t stream = nullptr);
+void launch_ood_evaluate_ext3_from_ext3(const uint64_t* coeff0, const uint64_t* coeff1,
+                                        const uint64_t* coeff2, const uint64_t* points,
+                                        uint64_t* out, uint32_t vector_size,
+                                        uint32_t num_vectors, uint32_t num_points,
+                                        cudaStream_t stream = nullptr);
 
 } // namespace whir::cuda
 #else

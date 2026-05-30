@@ -1,7 +1,0 @@
-
-
-WARNING: Failed to compile instrument-hooks native library with cc-rs.
-The library will still compile, but instrument-hooks functionality will be disabled.
-Compiler information: Tool { path: "C:\\VisualStudio\\VC\\Tools\\MSVC\\14.50.35717\\bin\\HostX64\\x64\\cl.exe", cc_wrapper_path: None, cc_wrapper_args: [], args: ["-nologo", "-MD", "-O2", "-Z7", "-Brepro", "-I", "instrument-hooks/includes", "-W0", "-std=c11", "-Wno-format", "-Wno-format-security", "-Wno-unused-but-set-variable", "-Wno-unused-const-variable", "-Wno-type-limits", "-Wno-uninitialized", "-Wno-overflow", "-Wno-unused-function", "-Wno-constant-conversion", "-Wno-incompatible-pointer-types"], env: [("VSLANG", "1033")], family: Msvc { clang_cl: false }, cuda: false, removed_args: [], has_internal_target_arg: false }
-Compilation error: ToolExecError: command did not execute successfully (status code exit code: 2): "C:\\VisualStudio\\VC\\Tools\\MSVC\\14.50.35717\\bin\\HostX64\\x64\\cl.exe" "-nologo" "-MD" "-O2" "-Z7" "-Brepro" "-I" "instrument-hooks/includes" "-W0" "-std=c11" "-Wno-format" "-Wno-format-security" "-Wno-unused-but-set-variable" "-Wno-unused-const-variable" "-Wno-type-limits" "-Wno-uninitialized" "-Wno-overflow" "-Wno-unused-function" "-Wno-constant-conversion" "-Wno-incompatible-pointer-types" "-FoC:\\Users\\DELL\\Desktop\\WhirPlonk\\rust\\target\\debug\\build\\codspeed-e55631818ce1f4be\\out\\b68c03e3d0475a32-core.o" "-c" "instrument-hooks/dist/core.c"
-

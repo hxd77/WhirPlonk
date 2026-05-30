@@ -1,12 +1,11 @@
 pub mod algebra;
 pub mod ark_serde;
 pub mod bits;
-pub mod canonical_config;
 pub mod cmdline_utils;
-pub mod deterministic_rng;
 pub mod engines;
 pub mod hash;
 pub mod parameters;
+pub mod profiling;
 pub mod protocols;
 pub mod transcript;
 pub mod type_info;

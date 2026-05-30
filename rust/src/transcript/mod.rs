@@ -48,9 +48,21 @@ where
 
 #[derive(Clone, Copy, Debug)]
 pub struct DomainSeparator<'a, I> {
-    protocol_id: [u8; 64],
-    session_id: [u8; 32],
+    pub protocol_id: [u8; 64],
+    pub session_id: [u8; 32],
     instance: &'a I,
+}
+
+impl<'a, I> DomainSeparator<'a, I> {
+    /// 使用预先计算好的 protocol_id 和 session_id 构造 DomainSeparator。
+    /// 用于跨语言一致性验证场景，确保 Rust 和 C++ 端使用相同的域分隔符。
+    pub const fn with_ids(protocol_id: [u8; 64], session_id: [u8; 32], instance: &'a I) -> Self {
+        Self {
+            protocol_id,
+            session_id,
+            instance,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
@@ -108,17 +120,6 @@ pub trait VerifierMessage {
 }
 
 impl DomainSeparator<'static, ()> {
-    //相比原版rust增加了from_ids
-    #[must_use]
-    pub const fn from_ids(protocol_id: [u8; 64], session_id: [u8; 32]) -> Self {
-        const INSTANCE: &() = &();
-        Self {
-            protocol_id,
-            session_id,
-            instance: INSTANCE,
-        }
-    }
-
     pub fn protocol<C: Serialize>(config: &C) -> Self {
         const INSTANCE: &() = &();
         let mut hash = Sha3_512::new();
@@ -145,18 +146,6 @@ impl DomainSeparator<'static, ()> {
             session_id: self.session_id,
             instance,
         }
-    }
-}
-
-impl<I> DomainSeparator<'_, I> {
-    #[must_use]
-    pub const fn protocol_id(&self) -> &[u8; 64] {
-        &self.protocol_id
-    }
-
-    #[must_use]
-    pub const fn session_id(&self) -> &[u8; 32] {
-        &self.session_id
     }
 }
 
@@ -221,6 +210,16 @@ where
         #[cfg(debug_assertions)]
         self.push(Interaction::ProverMessage(type_name::<T>().to_owned()));
         self.inner.prover_message(message);
+    }
+
+    #[cfg_attr(test, track_caller)]
+    pub fn prover_messages<T>(&mut self, messages: &[T])
+    where
+        T: Encoding<[H::U]> + NargSerialize,
+    {
+        for message in messages {
+            self.prover_message(message);
+        }
     }
 
     #[cfg_attr(test, track_caller)]

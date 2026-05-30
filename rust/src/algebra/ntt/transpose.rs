@@ -6,6 +6,14 @@ use crate::utils::workload_size;
 // NOTE: The assumption that rows and cols are a power of two are actually only relevant for the square matrix case.
 // (This is because the algorithm recurses into 4 sub-matrices of half dimension; we assume those to be square matrices as well, which only works for powers of two).
 
+/// Compute the row-major index permutation for a transposition.
+#[cfg(not(feature = "rs_in_order"))]
+pub fn transpose_permute(index: usize, rows: usize, cols: usize) -> usize {
+    debug_assert!(index < rows * cols);
+    let (row, col) = (index / cols, index % cols);
+    row + col * rows
+}
+
 /// Transposes a matrix in-place.
 ///
 /// This function processes a batch of matrices if the slice length is a multiple of `rows * cols`.
@@ -159,31 +167,31 @@ fn transpose_square_swap<F: Sized + Send>(mut a: MatrixMut<'_, F>, mut b: Matrix
     // - Enables parallel execution
     if 2 * size * size > workload_size::<F>() {
         let n = size / 2;
-        let (aa, ab, ac, ad) = a.split_quadrants(n, n);
-        let (ba, bb, bc, bd) = b.split_quadrants(n, n);
+        let (a_tl, a_tr, a_bl, a_br) = a.split_quadrants(n, n);
+        let (b_tl, b_tr, b_bl, b_br) = b.split_quadrants(n, n);
 
         #[cfg(feature = "parallel")]
         rayon::join(
             || {
                 rayon::join(
-                    || transpose_square_swap(aa, ba),
-                    || transpose_square_swap(ab, bc),
+                    || transpose_square_swap(a_tl, b_tl),
+                    || transpose_square_swap(a_tr, b_bl),
                 )
             },
             || {
                 rayon::join(
-                    || transpose_square_swap(ac, bb),
-                    || transpose_square_swap(ad, bd),
+                    || transpose_square_swap(a_bl, b_tr),
+                    || transpose_square_swap(a_br, b_br),
                 )
             },
         );
 
         #[cfg(not(feature = "parallel"))]
         {
-            transpose_square_swap(aa, ba);
-            transpose_square_swap(ab, bc);
-            transpose_square_swap(ac, bb);
-            transpose_square_swap(ad, bd);
+            transpose_square_swap(a_tl, b_tl);
+            transpose_square_swap(a_tr, b_bl);
+            transpose_square_swap(a_bl, b_tr);
+            transpose_square_swap(a_br, b_br);
         }
     } else {
         // Optimized 2×2 loop unrolling for larger blocks
@@ -371,11 +379,14 @@ mod tests {
         }
     }
 
+    fn arb_pow2() -> impl Strategy<Value = usize> {
+        (0..=8).prop_map(|log2_size| 1_usize << log2_size)
+    }
+
     /// Generates random square matrices with sizes that are powers of two.
     #[allow(clippy::cast_sign_loss)]
     fn arb_square_matrix() -> impl Strategy<Value = (Vec<usize>, usize)> {
-        (2usize..=64)
-            .prop_filter("Must be power of two", |&size| size.is_power_of_two())
+        arb_pow2()
             .prop_map(|size| size * size)
             .prop_flat_map(|matrix_size| {
                 prop::collection::vec(0usize..1000, matrix_size)
@@ -385,14 +396,10 @@ mod tests {
 
     /// Generates random rectangular matrices where rows and columns are powers of two.
     fn arb_rect_matrix() -> impl Strategy<Value = (Vec<usize>, usize, usize)> {
-        (2usize..=64, 2usize..=64)
-            .prop_filter("Rows and columns must be power of two", |&(r, c)| {
-                r.is_power_of_two() && c.is_power_of_two()
-            })
-            .prop_flat_map(|(rows, cols)| {
-                prop::collection::vec(0usize..1000, rows * cols)
-                    .prop_map(move |matrix| (matrix, rows, cols))
-            })
+        (arb_pow2(), arb_pow2()).prop_flat_map(|(rows, cols)| {
+            prop::collection::vec(0usize..1000, rows * cols)
+                .prop_map(move |matrix| (matrix, rows, cols))
+        })
     }
 
     proptest! {

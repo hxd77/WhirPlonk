@@ -333,7 +333,7 @@ Witness commit(
     EngineLookup&& engine_lookup)
 {
     Witness w = build_tree(config, std::move(leaves), std::forward<EngineLookup>(engine_lookup));
-    prover_state.prover_message(w.nodes.back());
+    prover_state.prover_message(w.nodes.back()); //把Merkle Root写入prover的transcript，最后返回整个Merkle 见证数据w
     return w;
 }
 

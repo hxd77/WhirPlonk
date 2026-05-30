@@ -2,7 +2,14 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/cpp/build/_deps/googletest-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cpp/build_cpu/_deps/googletest-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cpp/build_cpu_default/_deps/googletest-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cpp/build_cpu_win/_deps/googletest-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cpp/build_cross_language_golden/_deps/googletest-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cpp/build_cuda/_deps/googletest-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cpp/build_cuda_vs_path/_deps/googletest-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cpp/cmake-build-debug/_deps/googletest-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/everything-claude-code" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/rust" vcs="Git" />
   </component>
 </project>

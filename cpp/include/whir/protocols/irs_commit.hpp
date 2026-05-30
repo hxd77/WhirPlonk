@@ -53,6 +53,7 @@
 #include <cmath>
 #include <cstddef>
 #include <optional>
+#include <type_traits>
 #include <vector>
 
 namespace whir::protocols::irs_commit {
@@ -402,7 +403,7 @@ struct Config {
                 auto& engine = ::whir::algebra::ntt::goldilocks_ext3_engine();
                 if (matrix_hash_id == ::whir::hash::ENGINE_ID_BLAKE3 &&
                     engine.try_gpu_interleaved_rs_encode_blake3_matrix_leaves( //prove阶段
-                        vectors, codeword_length, interleaving_depth, matrix, leaves)) {
+                        vectors, codeword_length, interleaving_depth, matrix, leaves)) { //在原数组上更改值
                     leaves_ready = true;
                 } else {
                     matrix = ::whir::algebra::ntt::interleaved_rs_encode<Source>(
@@ -412,7 +413,6 @@ struct Config {
                 static_assert(sizeof(Source) == 0, "IRS commit: unsupported field type");
             }
         }
-
         // 2. 逐行 LE 编码 + 哈希 -> 叶子哈希列表
         //    每行有 num_cols 个域元素，每个编码为 8/16/24 字节。
         //    hash_many 以行为单位处理整个平坦缓冲区。
@@ -423,57 +423,132 @@ struct Config {
             (matrix_hash_id == ::whir::hash::ENGINE_ID_SHA2)
                 ? static_cast<const ::whir::hash::HashEngine&>(sha2_engine)
                 : static_cast<const ::whir::hash::HashEngine&>(blake3_engine);
-        if (!leaves_ready) {
+        if (!leaves_ready) { //leaves已经在gpu上计算完毕了
             leaves.resize(num_rows);
-            ::whir::profile::ScopedTimer timer("prover", num_rows, "merkle_leaf_total");
+            ::whir::profile::ScopedTimer timer("prover", num_rows, "merkle_leaf_total"); //如果经过GPU则不会走这里
             ::whir::protocols::matrix_commit::commit_leaves<Source>(
                 leaf_engine, matrix, num_cols(), leaves);
         }
 
         // 3. Merkle 树承诺 — 从叶子构建树，发送根。
+        //矩阵有多少行，就代表有多少个叶子
         // SHA-256 + CUDA 可只回传 root，并保留 leaves 供 open 时按需生成路径。
         std::vector<::whir::hash::Hash> matrix_leaves = leaves;
         merkle_tree::Witness mt_witness;
         bool committed_with_gpu_merkle_root = false;
-#if defined(WHIR_CUDA) && defined(WHIR_CUDA_EXPERIMENTAL_NTT)
-        if (matrix_hash_id == ::whir::hash::ENGINE_ID_SHA2 &&
-            ::whir::cuda::gpu_dispatch_enabled()) {
-            ::whir::hash::Hash root{};
-            ::whir::cuda::gpu_sha256_merkle_tree(
-                reinterpret_cast<const std::uint8_t*>(leaves.data()),
-                leaves.size(), root.data());
-            prover_state.prover_message(root);
-            committed_with_gpu_merkle_root = true;
-        }
-#endif
-        if (!committed_with_gpu_merkle_root) {
+        {
             ::whir::profile::ScopedTimer timer("prover", num_rows, "merkle_build_total");
-            mt_witness = merkle_tree::commit(prover_state,
-                matrix_commit_mt,
-                std::move(leaves),
-                [&blake3_engine, &sha2_engine](::whir::EngineId id) -> const ::whir::hash::HashEngine& {
-                    if (id == ::whir::hash::ENGINE_ID_SHA2) return sha2_engine;
-                    return blake3_engine;
-                });
+            //如果编译启用了CUDA，同时Merkle Tree使用的是BLAKE3/SHA2 hash，那么就用GPU来计算Merkle Root,把root写入transcript
+#if defined(WHIR_CUDA) && defined(WHIR_CUDA_EXPERIMENTAL_NTT)
+            if (::whir::cuda::gpu_dispatch_enabled() &&
+                (matrix_hash_id == ::whir::hash::ENGINE_ID_BLAKE3 ||
+                 matrix_hash_id == ::whir::hash::ENGINE_ID_SHA2)) {
+                ::whir::hash::Hash root{};
+                if (matrix_hash_id == ::whir::hash::ENGINE_ID_BLAKE3) {
+                    ::whir::cuda::gpu_blake3_merkle_tree( //gpu blake3 hash路径
+                        reinterpret_cast<const std::uint8_t*>(leaves.data()),
+                        leaves.size(), root.data());
+                } else {
+                    ::whir::cuda::gpu_sha256_merkle_tree(
+                        reinterpret_cast<const std::uint8_t*>(leaves.data()),
+                        leaves.size(), root.data());
+                }
+                prover_state.prover_message(root);
+                committed_with_gpu_merkle_root = true;
+            }
+#endif
+            //CPU路径构建Merkle tree
+            if (!committed_with_gpu_merkle_root) {
+                mt_witness = merkle_tree::commit(prover_state,
+                    matrix_commit_mt,
+                    std::move(leaves),
+                    [&blake3_engine, &sha2_engine](::whir::EngineId id) -> const ::whir::hash::HashEngine& {
+                        if (id == ::whir::hash::ENGINE_ID_SHA2) return sha2_engine;
+                        return blake3_engine;
+                    });
+            }
         }
 
         // 4. 域外采样 — 挤压随机扩域点，对每个原始向量在每个点处求值。
         //    OOD 采样检测近似性: 如果原始向量不是有效码字，
         //    域外求值很可能不一致。
-        auto oods_points = prover_state.template verifier_message_vec<Target>(out_domain_samples);
+        std::vector<Target> oods_points;
         std::vector<Target> oods_matrix;
-        oods_matrix.reserve(out_domain_samples * num_vectors);
-
         {
             ::whir::profile::ScopedTimer timer("prover", vector_size, "ood_evaluation");
-            for (const auto& point : oods_points) {
-                for (const auto& vec : vectors) {
-                    // mixed_univariate_evaluate: 将基域系数嵌入扩域，
-                    // 独立求值每个交错分量，合并为单个扩域值。
-                    Target value = ::whir::algebra::mixed_univariate_evaluate<M>(
-                        embedding_val, vec, point);
+            oods_points = prover_state.template verifier_message_vec<Target>(out_domain_samples);
+            oods_matrix.reserve(out_domain_samples * num_vectors);
+            bool ood_values_ready = false;
+
+            //把多个vectors在多个OOD点oods_points上求值，并优先尝试用GPU来计算
+#if defined(WHIR_CUDA) && defined(WHIR_CUDA_EXPERIMENTAL_NTT)
+            if constexpr (std::is_same_v<Target, ::whir::algebra::GoldilocksExt3>) { //如果是GoldilocksExt3域上
+                if (::whir::cuda::gpu_dispatch_enabled() && !oods_points.empty()) {
+                    std::vector<std::uint64_t> point_words;
+                    point_words.reserve(oods_points.size() * 3);
+                    for (const auto& p : oods_points) { //把OOD点拆成u64数组，每个OOD点是GoldilocksExt3域，所以可以看成p=c0+c1*u+c2*u^2
+                        point_words.push_back(p.c0().as_canonical_u64()); //转换成uint64_t
+                        point_words.push_back(p.c1().as_canonical_u64());
+                        point_words.push_back(p.c2().as_canonical_u64());
+                    }
+
+                    std::vector<std::uint64_t> out_words(oods_points.size() * num_vectors * 3); //GPU输出数组
+                    bool gpu_ok = false;
+                    if constexpr (std::is_same_v<Source, ::whir::algebra::Goldilocks>) { //Source是Goldilocks域
+                        std::vector<std::uint64_t> coeff0;
+                        coeff0.reserve(num_vectors * vector_size);
+                        for (const auto& vec : vectors) {
+                            for (const auto& x : vec) coeff0.push_back(x.as_canonical_u64()); //基域系数转成uint64_t
+                        }
+                        gpu_ok = ::whir::cuda::gpu_ood_evaluate_ext3_from_base( //调用GPU计算向量在OOD点上求值
+                            coeff0.data(), point_words.data(), out_words.data(),
+                            num_vectors, vector_size, oods_points.size());
+                    } else if constexpr (std::is_same_v<Source, ::whir::algebra::GoldilocksExt3>) { //Source是GoldilocksExt3域
+                        std::vector<std::uint64_t> coeff0;
+                        std::vector<std::uint64_t> coeff1;
+                        std::vector<std::uint64_t> coeff2;
+                        coeff0.reserve(num_vectors * vector_size);
+                        coeff1.reserve(num_vectors * vector_size);
+                        coeff2.reserve(num_vectors * vector_size);
+                        for (const auto& vec : vectors) {
+                            for (const auto& x : vec) {
+                                coeff0.push_back(x.c0().as_canonical_u64());
+                                coeff1.push_back(x.c1().as_canonical_u64());
+                                coeff2.push_back(x.c2().as_canonical_u64());
+                            }
+                        }
+                        gpu_ok = ::whir::cuda::gpu_ood_evaluate_ext3_from_ext3(
+                            coeff0.data(), coeff1.data(), coeff2.data(), point_words.data(),
+                            out_words.data(), num_vectors, vector_size, oods_points.size());
+                    }
+
+                    if (gpu_ok) {
+                        oods_matrix.reserve(oods_points.size() * num_vectors);
+                        for (std::size_t i = 0; i < oods_points.size() * num_vectors; ++i) {
+                            oods_matrix.emplace_back(
+                                ::whir::algebra::Goldilocks::from_u64(out_words[i * 3 + 0]),
+                                ::whir::algebra::Goldilocks::from_u64(out_words[i * 3 + 1]),
+                                ::whir::algebra::Goldilocks::from_u64(out_words[i * 3 + 2]));
+                        }
+                        ood_values_ready = true;
+                    }
+                }
+            }
+#endif
+            if (ood_values_ready) {
+                for (const auto& value : oods_matrix) {
                     prover_state.prover_message(value);
-                    oods_matrix.push_back(value);
+                }
+            } else {
+                for (const auto& point : oods_points) {
+                    for (const auto& vec : vectors) {
+                        // mixed_univariate_evaluate: 将基域系数嵌入扩域，
+                        // 独立求值每个交错分量，合并为单个扩域值。
+                        Target value = ::whir::algebra::mixed_univariate_evaluate<M>(
+                            embedding_val, vec, point);
+                        prover_state.prover_message(value);
+                        oods_matrix.push_back(value);
+                    }
                 }
             }
         }
@@ -603,17 +678,25 @@ struct Config {
             // 2b. Merkle 树打开 — 为被挑战的叶子发送兄弟哈希。
             bool opened_with_gpu_merkle_path = false;
 #if defined(WHIR_CUDA) && defined(WHIR_CUDA_EXPERIMENTAL_NTT)
-            if (matrix_hash_id == ::whir::hash::ENGINE_ID_SHA2 &&
-                ::whir::cuda::gpu_dispatch_enabled() &&
+            if (::whir::cuda::gpu_dispatch_enabled() &&
+                (matrix_hash_id == ::whir::hash::ENGINE_ID_BLAKE3 ||
+                 matrix_hash_id == ::whir::hash::ENGINE_ID_SHA2) &&
                 w->matrix_leaves.size() == codeword_length) {
                 const auto hint_nodes = ::whir::cuda::merkle_hint_node_indices(
                     w->matrix_leaves.size(), std::span<const std::size_t>{indices});
                 ::whir::hash::Hash root{};
                 std::vector<::whir::hash::Hash> hints(hint_nodes.size());
-                ::whir::cuda::gpu_sha256_merkle_open_path(
-                    reinterpret_cast<const std::uint8_t*>(w->matrix_leaves.data()),
-                    w->matrix_leaves.size(), std::span<const std::size_t>{indices},
-                    root.data(), reinterpret_cast<std::uint8_t*>(hints.data()));
+                if (matrix_hash_id == ::whir::hash::ENGINE_ID_BLAKE3) {
+                    ::whir::cuda::gpu_blake3_merkle_open_path(
+                        reinterpret_cast<const std::uint8_t*>(w->matrix_leaves.data()),
+                        w->matrix_leaves.size(), std::span<const std::size_t>{indices},
+                        root.data(), reinterpret_cast<std::uint8_t*>(hints.data()));
+                } else {
+                    ::whir::cuda::gpu_sha256_merkle_open_path(
+                        reinterpret_cast<const std::uint8_t*>(w->matrix_leaves.data()),
+                        w->matrix_leaves.size(), std::span<const std::size_t>{indices},
+                        root.data(), reinterpret_cast<std::uint8_t*>(hints.data()));
+                }
                 for (const auto& h : hints) prover_state.prover_hint(h);
                 opened_with_gpu_merkle_path = true;
             }

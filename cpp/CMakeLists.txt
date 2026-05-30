@@ -182,12 +182,8 @@ endif()
 # CUDA：GPU 加速 NTT / RS Encoding
 # ----------------------------------------------------------------------------
 #
-# USE_CUDA:
-#   兼容用的别名选项。
-#   如果用户传 -DUSE_CUDA=ON，也会让 WHIR_CUDA 默认为 ON。
-#
 # WHIR_CUDA:
-#   真正控制是否启用 CUDA 的选项。
+#   控制是否启用 CUDA 的选项。
 #
 # WHIR_CUDA_EXPERIMENTAL_NTT:
 #   是否启用实验性的 CUDA NTT / RS encoding dispatch 路径。
@@ -202,13 +198,8 @@ endif()
 #   T400 / Turing:    75
 #   RTX 30 系 / Ampere: 86
 #   RTX 4090 / Ada:   89
-option(USE_CUDA "Alias for WHIR_CUDA; enables CUDA GPU acceleration" OFF)
-option(WHIR_CUDA "Enable CUDA GPU acceleration" ${USE_CUDA})
+option(WHIR_CUDA "Enable CUDA GPU acceleration" OFF)
 option(WHIR_CUDA_EXPERIMENTAL_NTT "Enable CUDA dispatch for Goldilocks NTT/RS encoding" ON)
-
-if(USE_CUDA AND NOT WHIR_CUDA)
-    set(WHIR_CUDA ON CACHE BOOL "Enable CUDA GPU acceleration" FORCE)
-endif()
 
 if(WHIR_CUDA)
     # 当 WHIR_CUDA=ON 时，才启用 CUDA 语言。
